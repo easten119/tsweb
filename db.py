@@ -242,6 +242,14 @@ def init_db():
             created_at     DATETIME DEFAULT CURRENT_TIMESTAMP
         );
 
+        CREATE TABLE IF NOT EXISTS floor_labels (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            building_id INTEGER NOT NULL REFERENCES buildings(id),
+            floor       INTEGER NOT NULL,
+            label       TEXT NOT NULL,
+            UNIQUE(building_id, floor)
+        );
+
         CREATE TABLE IF NOT EXISTS user_sites (
             id      INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER NOT NULL REFERENCES users(id),
@@ -961,6 +969,26 @@ def find_unit_status_mismatches():
             JOIN sites s ON u.site_id=s.id
         """))
     return [r for r in rows if (r['expected'] or '공실') != r['status']]
+
+
+def get_floor_labels(site_id):
+    """현황판 특수층 이름 {building_id: {층: 이름}} (예: 1층 근린생활시설, 47층 스카이라운지)."""
+    result = {}
+    with connect() as conn:
+        for r in conn.execute("""
+            SELECT fl.building_id, fl.floor, fl.label FROM floor_labels fl
+            JOIN buildings b ON fl.building_id = b.id WHERE b.site_id = ?
+        """, (site_id,)):
+            result.setdefault(r[0], {})[r[1]] = r[2]
+    return result
+
+
+def save_floor_labels(building_id, labels):
+    """해당 동의 특수층 이름을 통째로 교체. labels: {층: 이름}"""
+    with connect() as conn:
+        conn.execute("DELETE FROM floor_labels WHERE building_id=?", (building_id,))
+        conn.executemany("INSERT INTO floor_labels (building_id, floor, label) VALUES (?, ?, ?)",
+                         [(building_id, int(f), str(l).strip()) for f, l in labels.items() if str(l).strip()])
 
 
 def get_unit_status_summary(site_id):

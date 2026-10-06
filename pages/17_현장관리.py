@@ -3,6 +3,7 @@ import pandas as pd
 from datetime import date
 import db
 import sidebar
+import board
 
 user = sidebar.page_setup("현장 관리", "📍", roles=('admin',))
 sidebar.show_flash()
@@ -22,7 +23,8 @@ else:
     st.info("등록된 현장이 없습니다.")
 
 st.markdown("---")
-tab_add, tab_edit, tab_del, tab_upload = st.tabs(["➕ 현장 추가", "✏️ 현장 수정", "🗑️ 현장 삭제", "📤 호실 일괄 업로드"])
+tab_add, tab_edit, tab_del, tab_upload, tab_floor = st.tabs(
+    ["➕ 현장 추가", "✏️ 현장 수정", "🗑️ 현장 삭제", "📤 호실 일괄 업로드", "🏢 층 표시 설정"])
 
 with tab_add:
     with st.form("form_add_site", clear_on_submit=True):
@@ -152,3 +154,46 @@ with tab_upload:
                     st.session_state.pop('unit_upload', None)
                     sidebar.flash(f"단지 {n_c}개 · 동 {n_b}개 · 신규 호실 {n_new}개 · 갱신 {n_upd}개 반영 완료")
                     st.rerun()
+
+with tab_floor:
+    st.markdown("##### 현황판 층 표시 설정")
+    st.caption("호실이 없는 층에 이름을 붙여 현황판에 표시합니다 (예: 1~2층 근린생활시설, 3층 비주거 주차장, 4층 옥상정원). "
+               "최상층보다 높은 층 번호(예: 47층)를 넣으면 맨 위에 '스카이라운지'처럼 표시됩니다. "
+               "이름이 없는 빈 층은 ✕(피난층 등)로 표시됩니다.")
+    if not sites:
+        st.info("현장을 먼저 추가하세요.")
+    else:
+        by_id = {s['id']: s for s in sites}
+        fl_sid = st.selectbox("현장", list(by_id), key="fl_site", format_func=lambda i: by_id[i]['name'])
+        blds = db.get_buildings(site_id=fl_sid)
+        if not blds:
+            st.info("이 현장에 등록된 동이 없습니다.")
+        else:
+            multi = len({b['complex_id'] for b in blds}) > 1
+            bmap = {b['id']: b for b in blds}
+            fl_bid = st.selectbox("기준 동", list(bmap), key="fl_bld",
+                                  format_func=lambda i: sidebar.building_label(bmap[i], multi))
+            cur = db.get_floor_labels(fl_sid).get(fl_bid, {})
+            bunits = db.get_units(site_id=fl_sid, building_id=fl_bid)
+            floors = {board.parse_unit_no(u['unit_no'])[0] for u in bunits} - {None}
+            if floors:
+                empty = [f for f in range(1, max(floors) + 1) if f not in floors]
+                st.caption(f"이 동의 호실 층: {min(floors)}~{max(floors)}층 · 호실 없는 층: "
+                           + (", ".join(f"{f}층" for f in empty) if empty else "없음"))
+            df = pd.DataFrame([{'층': f, '표시 이름': l} for f, l in sorted(cur.items(), reverse=True)],
+                              columns=['층', '표시 이름'])
+            edited = st.data_editor(
+                df, num_rows="dynamic", width="content", hide_index=True, key=f"fl_editor_{fl_bid}",
+                column_config={'층': st.column_config.NumberColumn('층', min_value=1, max_value=200, step=1, format="%d"),
+                               '표시 이름': st.column_config.TextColumn('표시 이름', width="medium")})
+            apply_all = st.checkbox("이 현장의 모든 동에 똑같이 적용", value=False, key="fl_all")
+            if st.button("💾 층 표시 저장", type="primary"):
+                new = {}
+                for _, r in edited.iterrows():
+                    if pd.notna(r['층']) and str(r['표시 이름'] or '').strip():
+                        new[int(r['층'])] = str(r['표시 이름']).strip()
+                targets = list(bmap) if apply_all else [fl_bid]
+                for bid in targets:
+                    db.save_floor_labels(bid, new)
+                sidebar.flash(f"{len(targets)}개 동에 층 표시 {len(new)}개 저장")
+                st.rerun()

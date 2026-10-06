@@ -137,8 +137,9 @@ else:
 st.markdown("---")
 st.subheader("📋 정산 이력")
 h1, h2 = st.columns(2)
-hist_site_id, _, _ = sidebar.select_site(user, key="hist_site_sel", label="현장 필터", allow_all=True, container=h1)
-hist = db.get_settlements(site_id=hist_site_id, site_ids=allowed_ids)
+hist_site_id, _, hist_sites = sidebar.select_site(user, key="hist_site_sel", label="현장 필터", allow_all=True,
+                                                  container=h1)
+hist = db.get_settlements(site_id=hist_site_id, site_ids=[s['id'] for s in hist_sites])
 
 if not hist:
     st.info("저장된 이력이 없습니다.")

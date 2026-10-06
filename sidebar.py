@@ -164,26 +164,47 @@ def accessible_site_ids(user):
     return None
 
 
+SITE_GROUPS = ("진행중", "완료 현장")
+
+
 def select_site(user, key="site_sel", label="현장 선택", allow_all=False, container=None):
-    """접근 가능한 현장 선택. allow_all이면 '전체'(None) 선택지 포함.
-    반환: (site_id 또는 None, site dict 또는 None, 접근가능 현장 목록)"""
+    """접근 가능한 현장 선택. 완료 현장이 있으면 '진행중 / 완료 현장' 구분을 먼저 고른다.
+    allow_all이면 '전체'(None, 선택한 구분 안의 전체) 선택지 포함.
+    반환: (site_id 또는 None, site dict 또는 None, 선택 구분 안의 현장 목록)"""
     sites = get_accessible_sites(user, db.get_all_sites())
     if not sites:
         st.error("담당 현장이 배정되지 않았습니다. 관리자에게 문의하세요.")
         st.stop()
     box = container or st
+    active = [s for s in sites if s['status'] == '진행중']
+    done = [s for s in sites if s['status'] != '진행중']
+
+    if active and done:
+        gkey = f"{key}_group"
+        if gkey not in st.session_state:
+            st.session_state[gkey] = st.session_state.get('_last_site_group', SITE_GROUPS[0])
+        group = box.radio("현장 구분", SITE_GROUPS, key=gkey, horizontal=True, label_visibility="collapsed",
+                          format_func=lambda g: f"🟢 진행중 ({len(active)})" if g == SITE_GROUPS[0]
+                          else f"⚪ 완료 현장 ({len(done)})")
+        st.session_state['_last_site_group'] = group
+        sites = active if group == SITE_GROUPS[0] else done
+    else:
+        sites = active or done
+
     if len(sites) == 1 and not allow_all:
-        box.caption(f"현장: **{sites[0]['name']}**")
-        return sites[0]['id'], sites[0], sites
+        s0 = sites[0]
+        box.caption(f"현장: **{s0['name']}**" + ("" if s0['status'] == '진행중' else " (완료 현장)"))
+        return s0['id'], s0, sites
     options = ([None] if allow_all else []) + [s['id'] for s in sites]
     by_id = {s['id']: s for s in sites}
-    # 페이지를 옮겨 다녀도 마지막 선택 현장을 유지
-    last = st.session_state.get('_last_site_id')
-    if key not in st.session_state and last in options:
-        st.session_state[key] = last
+    # 페이지를 옮겨 다녀도 마지막 선택 현장을 유지 (구분이 바뀌어 목록에 없으면 첫 현장)
+    if st.session_state.get(key) not in options:
+        st.session_state.pop(key, None)
+        last = st.session_state.get('_last_site_id')
+        if last in options:
+            st.session_state[key] = last
     sid = box.selectbox(label, options, key=key,
-                        format_func=lambda i: '전체' if i is None else
-                        f"{by_id[i]['name']}" + ("" if by_id[i]['status'] == '진행중' else " (완료)"))
+                        format_func=lambda i: '전체' if i is None else by_id[i]['name'])
     if sid is not None:
         st.session_state['_last_site_id'] = sid
     return sid, by_id.get(sid), sites

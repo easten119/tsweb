@@ -1,5 +1,11 @@
 *.db
+*.db-journal
 __pycache__/
-.streamlit/secrets.toml
 *.pyc
 .env
+.streamlit/secrets.toml
+.claude/settings.local.json
+
+# 실명·연락처가 들어간 업로드 파일은 저장소에 올리지 않는다 (빈 양식은 앱에서 다운로드)
+*.xlsx
+*.xls

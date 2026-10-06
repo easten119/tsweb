@@ -60,11 +60,21 @@ def select_building(site_id, key, label="동", container=None, include_all=False
 
 
 def select_unit(units, key, label="호수", container=None, show_status=True):
-    by_id = {u['id']: u for u in units}
+    by_id = {u['id']: u for u in sorted(units, key=unit_sort_key)}
     uid = (container or st).selectbox(
         label, list(by_id), key=key,
         format_func=lambda i: by_id[i]['unit_no'] + (f"  ({by_id[i]['status']})" if show_status else ""))
     return by_id[uid]
+
+
+def natural_key(v):
+    """'101', '1001', 'B1' 같은 동·호수를 숫자 크기 순으로 정렬하기 위한 키."""
+    import re
+    return [(0, int(t), '') if t.isdigit() else (1, 0, t) for t in re.split(r'(\d+)', str(v or '')) if t]
+
+
+def unit_sort_key(u):
+    return (natural_key(u.get('building_no')), natural_key(u.get('unit_no')))
 
 
 def unit_title(u):

@@ -6,6 +6,7 @@ import streamlit as st
 
 import db
 from ui import common as cm
+from ui import money
 
 
 def _register(ctx):
@@ -19,77 +20,69 @@ def _register(ctx):
             return
         unit = cm.select_unit(units, key="tx_unit", container=c[1])
         ct = db.get_active_contract(unit['id'])
-        with st.form("tx_reg_form", clear_on_submit=True):
-            r = st.columns([1.1, 0.8, 1.3, 1.3])
-            d = r[0].date_input("날짜", value=date.today(), format="YYYY-MM-DD")
-            ttype = r[1].selectbox("구분", ["입금", "출금"])
-            item = r[2].selectbox("입금항목", [''] + cfg['payment_items'])
-            amt = r[3].text_input("금액 (원)", placeholder="1,000,000")
-            r = st.columns(4)
-            dep = r[0].text_input("입금자명", value=(ct or {}).get('customer_name') or '')
-            cust = r[1].text_input("고객명", value=(ct or {}).get('customer_name') or '')
-            acc = r[2].text_input("입금계좌", placeholder="예: 태성, 무궁화신탁")
-            rsn = r[3].text_input("출금사유")
-            nts = st.text_input("비고")
-            if st.form_submit_button("저장", type="primary"):
-                a = cm.parse_amount(amt)
-                if not a:
-                    st.error("금액을 숫자로 입력하세요.")
-                elif ttype == '출금' and not rsn.strip():
-                    st.error("출금 시에는 출금사유를 입력하세요.")
-                else:
-                    db.add_transaction(site_id, str(d), depositor=dep.strip() or None, customer=cust.strip() or None,
-                                       account=acc.strip() or None, amount=a, tx_type=ttype,
-                                       notes=nts.strip() or None, unit_id=unit['id'], item=item or None,
-                                       out_reason=(rsn.strip() or None) if ttype == '출금' else None)
-                    cm.flash(f"{unit['building_no']}동 {unit['unit_no']}호 {ttype} {a:,}원 저장")
-                    st.rerun()
+        n = money.round_of('_txr')          # 저장 후 입력칸을 비우기 위한 회차
+        name = (ct or {}).get('customer_name') or ''
+        r = st.columns([1.1, 0.8, 1.3, 1.6])
+        d = r[0].date_input("날짜", value=date.today(), format="YYYY-MM-DD", key=f"txr_d_{n}")
+        ttype = r[1].selectbox("구분", ["입금", "출금"], key=f"txr_t_{n}")
+        item = r[2].selectbox("입금항목", [''] + cfg['payment_items'], key=f"txr_i_{n}")
+        with r[3]:
+            amt = money.money_input("금액 (원)", key=f"txr_a_{n}_{unit['id']}")
+        r = st.columns(4)
+        dep = r[0].text_input("입금자명", value=name, key=f"txr_dep_{n}_{unit['id']}")
+        cust = r[1].text_input("고객명", value=name, key=f"txr_c_{n}_{unit['id']}")
+        acc = r[2].text_input("입금계좌", placeholder="예: 태성, 무궁화신탁", key=f"txr_acc_{n}")
+        rsn = r[3].text_input("출금사유", key=f"txr_r_{n}")
+        nts = st.text_input("비고", key=f"txr_n_{n}")
+        if st.button("저장", type="primary", key=f"txr_save_{n}", icon=":material/save:"):
+            if not amt:
+                st.error("금액을 입력하세요.")
+            elif ttype == '출금' and not rsn.strip():
+                st.error("출금 시에는 출금사유를 입력하세요.")
+            else:
+                db.add_transaction(site_id, str(d), depositor=dep.strip() or None, customer=cust.strip() or None,
+                                   account=acc.strip() or None, amount=amt, tx_type=ttype,
+                                   notes=nts.strip() or None, unit_id=unit['id'], item=item or None,
+                                   out_reason=(rsn.strip() or None) if ttype == '출금' else None)
+                money.next_round('_txr')
+                cm.flash(f"{unit['building_no']}동 {unit['unit_no']}호 {ttype} {amt:,}원 저장")
+                st.rerun()
 
 
 def _edit(ctx, tx):
-    site_id, cfg = ctx['site_id'], ctx['cfg']
+    cfg = ctx['cfg']
     st.markdown(f"<div class='ts-section'>거래 수정 — {tx.get('building_no') or ''}동 {tx.get('unit_no') or ''}호</div>",
                 unsafe_allow_html=True)
     items = [''] + cfg['payment_items'] + ([tx['item']] if tx.get('item') and tx['item'] not in cfg['payment_items'] else [])
-    with st.form(f"tx_edit_{tx['id']}"):
-        r = st.columns([1.1, 0.8, 1.3, 1.3])
-        d = r[0].date_input("날짜", value=cm.to_date(tx['date']) or date.today(), format="YYYY-MM-DD")
-        ttype = r[1].selectbox("구분", ["입금", "출금"], index=0 if tx['type'] == '입금' else 1)
-        item = r[2].selectbox("입금항목", items, index=items.index(tx.get('item') or ''))
-        amt = r[3].text_input("금액 (원)", value=f"{tx['amount']:,}")
-        r = st.columns(4)
-        dep = r[0].text_input("입금자명", value=tx.get('depositor') or '')
-        cust = r[1].text_input("고객명", value=tx.get('customer') or '')
-        acc = r[2].text_input("입금계좌", value=tx.get('account') or '')
-        rsn = r[3].text_input("출금사유", value=tx.get('out_reason') or '')
-        nts = st.text_input("비고", value=tx.get('notes') or '')
-        s1, s2, s3 = st.columns([1, 1, 5])
-        save = s1.form_submit_button("수정 저장", type="primary")
-        delete = s2.form_submit_button("삭제")
-    if save:
-        a = cm.parse_amount(amt)
-        if not a:
-            st.error("금액을 숫자로 입력하세요.")
+    k = f"txe_{tx['id']}"
+    r = st.columns([1.1, 0.8, 1.3, 1.6])
+    d = r[0].date_input("날짜", value=cm.to_date(tx['date']) or date.today(), format="YYYY-MM-DD", key=f"{k}_d")
+    ttype = r[1].selectbox("구분", ["입금", "출금"], index=0 if tx['type'] == '입금' else 1, key=f"{k}_t")
+    item = r[2].selectbox("입금항목", items, index=items.index(tx.get('item') or ''), key=f"{k}_i")
+    with r[3]:
+        amt = money.money_input("금액 (원)", key=f"{k}_a", value=tx['amount'])
+    r = st.columns(4)
+    dep = r[0].text_input("입금자명", value=tx.get('depositor') or '', key=f"{k}_dep")
+    cust = r[1].text_input("고객명", value=tx.get('customer') or '', key=f"{k}_c")
+    acc = r[2].text_input("입금계좌", value=tx.get('account') or '', key=f"{k}_acc")
+    rsn = r[3].text_input("출금사유", value=tx.get('out_reason') or '', key=f"{k}_r")
+    nts = st.text_input("비고", value=tx.get('notes') or '', key=f"{k}_n")
+    s1, s2, _ = st.columns([1, 1, 5])
+    if s1.button("수정 저장", type="primary", key=f"{k}_save"):
+        if not amt:
+            st.error("금액을 입력하세요.")
             return
         db.update_transaction(tx['id'], str(d), depositor=dep.strip() or None, customer=cust.strip() or None,
-                              account=acc.strip() or None, amount=a, tx_type=ttype, notes=nts.strip() or None,
+                              account=acc.strip() or None, amount=amt, tx_type=ttype, notes=nts.strip() or None,
                               unit_id=tx.get('unit_id'), item=item or None,
                               out_reason=(rsn.strip() or None) if ttype == '출금' else None)
         cm.flash("수정 완료")
         st.rerun()
-    if delete:
-        st.session_state['_tx_del'] = tx['id']
-        st.rerun()
-    if st.session_state.get('_tx_del') == tx['id']:
-        st.warning(f"{tx['date']} {tx['type']} {tx['amount']:,}원을 삭제합니다. 되돌릴 수 없습니다.")
-        c1, c2, _ = st.columns([1, 1, 5])
-        if c1.button("삭제 확인", type="primary"):
+    with s2.popover("삭제"):
+        st.caption(f"{tx['date']} {tx['type']} {tx['amount']:,}원을 삭제합니다. 되돌릴 수 없습니다.")
+        if st.button("삭제 확인", type="primary", key=f"{k}_del"):
             db.delete_transaction(tx['id'])
-            st.session_state.pop('_tx_del', None)
             cm.flash("삭제 완료")
-            st.rerun()
-        if c2.button("취소"):
-            st.session_state.pop('_tx_del', None)
             st.rerun()
 
 

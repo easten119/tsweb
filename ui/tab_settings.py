@@ -35,11 +35,11 @@ def _basic(ctx, admin):
         status = r[3].selectbox("상태", ['진행중', '완료'], index=0 if site['status'] == '진행중' else 1,
                                 disabled=not admin)
         r = st.columns(4)
-        da = r[0].number_input("일비 단가", value=int(site.get('daily_allowance') or 10000), step=1000, min_value=0,
+        da = r[0].number_input("일비 단가", value=db.get_site_rates(site['id'])[0], step=1000, min_value=0,
                                disabled=not admin)
-        hl = r[1].number_input("숙소비 (해당지역)", value=int(site.get('housing_local') or 200000), step=10000,
+        hl = r[1].number_input("숙소비 (해당지역)", value=db.get_site_rates(site['id'])[1], step=10000,
                                min_value=0, disabled=not admin)
-        ho = r[2].number_input("숙소비 (타지역)", value=int(site.get('housing_other') or 300000), step=10000,
+        ho = r[2].number_input("숙소비 (타지역)", value=db.get_site_rates(site['id'])[2], step=10000,
                                min_value=0, disabled=not admin)
         st.caption("단가 변경은 이후 계산부터 적용되며, 이미 저장된 정산 이력 금액은 바뀌지 않습니다. "
                    "현장이 끝나면 상태를 '완료'로 바꾸세요 (대시보드 지표에서 빠집니다).")

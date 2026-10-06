@@ -374,9 +374,10 @@ def get_site_rates(site_id):
     site = get_site(site_id) if site_id else None
     if not site:
         return 10000, 200000, 300000
-    return (int(site.get('daily_allowance') or 10000),
-            int(site.get('housing_local') or 200000),
-            int(site.get('housing_other') or 300000))
+    # 0원도 유효한 값이다 (값이 비어 있을 때만 기본값)
+    def _v(k, d):
+        return d if site.get(k) is None else int(site[k])
+    return _v('daily_allowance', 10000), _v('housing_local', 200000), _v('housing_other', 300000)
 
 
 def add_site(name, region, start_date, status='진행중',
@@ -1430,6 +1431,25 @@ def delete_cancellation(cancel_id):
     if cl['contract_id']:
         return True, "해지가 취소되어 원 계약이 복구되었습니다."
     return True, "해지 내역이 삭제되었습니다."
+
+
+def purge_cancellation(cancel_id, with_contract=True):
+    """해지 내역 완전 삭제 (테스트·오입력 정리용). 원 계약이 '해지' 상태면 함께 지운다.
+    호실은 유효 계약 기준으로 다시 맞춘다 (보통 공실)."""
+    with connect() as conn:
+        cl = conn.execute("SELECT unit_id, contract_id FROM cancellations WHERE id=?", (cancel_id,)).fetchone()
+        if not cl:
+            return False, "해지 내역을 찾을 수 없습니다."
+        conn.execute("DELETE FROM cancellations WHERE id=?", (cancel_id,))
+        removed_ct = False
+        if with_contract and cl['contract_id']:
+            st_ = conn.execute("SELECT status FROM contracts WHERE id=?", (cl['contract_id'],)).fetchone()
+            if st_ and st_['status'] == CONTRACT_CANCELLED:
+                conn.execute("UPDATE cancellations SET contract_id=NULL WHERE contract_id=?", (cl['contract_id'],))
+                conn.execute("DELETE FROM contracts WHERE id=?", (cl['contract_id'],))
+                removed_ct = True
+        _resync_unit_status(conn.cursor(), [cl['unit_id']])
+    return True, "해지 내역" + ("과 원 계약 기록을" if removed_ct else "을") + " 삭제했습니다."
 
 
 def find_orphan_cancellations():

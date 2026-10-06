@@ -7,6 +7,7 @@ import streamlit as st
 import db
 import templates
 from ui import common as cm
+from ui import money
 
 
 def _cancel_form(ctx):
@@ -16,7 +17,7 @@ def _cancel_form(ctx):
     if not contracts:
         st.caption("해지할 유효 계약이 없습니다.")
         return
-    contracts.sort(key=lambda c: (str(c['building_no']), str(c['unit_no'])))
+    contracts.sort(key=cm.unit_sort_key)
     by_id = {c['id']: c for c in contracts}
     pre = st.session_state.pop('_cancel_unit', None)
     default = next((c['id'] for c in contracts if c['unit_id'] == pre), None)
@@ -30,22 +31,20 @@ def _cancel_form(ctx):
     paid = sum(t['amount'] for t in txs if t['type'] == '입금') - sum(t['amount'] for t in txs if t['type'] == '출금')
     st.caption(f"계약일 {ct.get('contract_date') or ct.get('pre_date') or '-'} · 계약금 {cm.won(ct.get('deposit_total'))}원 · "
                f"입금 잔액 {paid:,}원")
-    with st.form(f"cx_form_{cid}", clear_on_submit=True):
-        r = st.columns(4)
-        cdate = r[0].date_input("해지접수일", value=date.today(), format="YYYY-MM-DD")
-        refund = r[1].number_input("환불금액", min_value=0, step=100000, format="%d", help=f"입금 잔액 {paid:,}원")
-        bank = r[2].text_input("환불은행")
-        acno = r[3].text_input("계좌번호")
-        notes = st.text_input("비고 (해지 사유 등)")
-        ok = st.checkbox(f"{ct['customer_name']} 님의 계약을 해지하고 호실을 공실로 전환합니다.")
-        if st.form_submit_button("해지 처리", type="primary"):
-            if not ok:
-                st.error("확인란을 선택하세요.")
-            else:
-                db.cancel_contract(cid, cancel_date=str(cdate), refund_amount=int(refund), bank=bank.strip() or None,
-                                   account_no=acno.strip() or None, notes=notes.strip() or None)
-                cm.flash(f"{ct['building_no']}동 {ct['unit_no']}호 해지 처리 완료")
-                st.rerun()
+    k = f"cx_{cid}"
+    r = st.columns(4)
+    cdate = r[0].date_input("해지접수일", value=date.today(), format="YYYY-MM-DD", key=f"{k}_d")
+    with r[1]:
+        refund = money.money_input("환불금액", key=f"{k}_amt")
+    bank = r[2].text_input("환불은행", key=f"{k}_b")
+    acno = r[3].text_input("계좌번호", key=f"{k}_ac")
+    notes = st.text_input("비고 (해지 사유 등)", key=f"{k}_n")
+    ok = st.checkbox(f"{ct['customer_name']} 님의 계약을 해지하고 호실을 공실로 전환합니다.", key=f"{k}_ok")
+    if st.button("해지 처리", type="primary", key=f"{k}_go", disabled=not ok):
+        db.cancel_contract(cid, cancel_date=str(cdate), refund_amount=int(refund), bank=bank.strip() or None,
+                           account_no=acno.strip() or None, notes=notes.strip() or None)
+        cm.flash(f"{ct['building_no']}동 {ct['unit_no']}호 해지 처리 완료")
+        st.rerun()
     st.caption("환불 출금은 입출금 탭에서 출금으로 기록하세요.")
 
 
@@ -77,24 +76,32 @@ def render(ctx):
     c = cancels[rows[0]]
     st.markdown(f"<div class='ts-section'>해지 내역 — {c['building_no']}동 {c['unit_no']}호 "
                 f"{c.get('customer_name') or ''}</div>", unsafe_allow_html=True)
-    with st.form(f"cx_edit_{c['id']}"):
-        r = st.columns(4)
-        cdate = r[0].date_input("해지접수일", value=cm.to_date(c.get('cancel_date')) or date.today(), format="YYYY-MM-DD")
-        refund = r[1].number_input("환불금액", value=int(c.get('refund_amount') or 0), min_value=0, step=100000,
-                                   format="%d")
-        bank = r[2].text_input("환불은행", value=c.get('bank') or '')
-        acno = r[3].text_input("계좌번호", value=c.get('account_no') or '')
-        notes = st.text_input("비고", value=c.get('notes') or '')
-        if st.form_submit_button("수정 저장", type="primary"):
-            db.update_cancellation(c['id'], cancel_date=str(cdate), refund_amount=int(refund),
-                                   bank=bank.strip() or None, account_no=acno.strip() or None,
-                                   notes=notes.strip() or None)
-            cm.flash("수정 완료")
-            st.rerun()
-    with st.popover("해지 취소 (원 계약 복구)", icon=":material/undo:"):
+    k = f"cxe_{c['id']}"
+    r = st.columns(4)
+    cdate = r[0].date_input("해지접수일", value=cm.to_date(c.get('cancel_date')) or date.today(), format="YYYY-MM-DD",
+                            key=f"{k}_d")
+    with r[1]:
+        refund = money.money_input("환불금액", key=f"{k}_amt", value=c.get('refund_amount') or 0)
+    bank = r[2].text_input("환불은행", value=c.get('bank') or '', key=f"{k}_b")
+    acno = r[3].text_input("계좌번호", value=c.get('account_no') or '', key=f"{k}_ac")
+    notes = st.text_input("비고", value=c.get('notes') or '', key=f"{k}_n")
+    if st.button("수정 저장", type="primary", key=f"{k}_save"):
+        db.update_cancellation(c['id'], cancel_date=str(cdate), refund_amount=int(refund),
+                               bank=bank.strip() or None, account_no=acno.strip() or None, notes=notes.strip() or None)
+        cm.flash("수정 완료")
+        st.rerun()
+    b1, b2, _ = st.columns([1.4, 1.4, 4])
+    with b1.popover("해지 취소 (원 계약 복구)", icon=":material/undo:"):
         st.caption("해지 내역을 지우고 원래 계약을 다시 유효 상태로 되돌립니다. "
                    "그 사이 같은 호실에 새 계약이 있으면 취소할 수 없습니다.")
         if st.button("해지 취소 확인", type="primary", key=f"cx_undo_{c['id']}"):
             ok, msg = db.delete_cancellation(c['id'])
+            cm.flash(msg, "success" if ok else "error")
+            st.rerun()
+    with b2.popover("해지 내역 삭제", icon=":material/delete:"):
+        st.caption("테스트·오입력 정리용입니다. 해지 내역과 해지된 원 계약 기록을 완전히 지우고 호실을 공실로 둡니다. "
+                   "되돌릴 수 없습니다. 입출금 내역은 지우지 않습니다.")
+        if st.button("삭제 확인", type="primary", key=f"cx_purge_{c['id']}"):
+            ok, msg = db.purge_cancellation(c['id'])
             cm.flash(msg, "success" if ok else "error")
             st.rerun()

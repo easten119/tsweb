@@ -7,6 +7,7 @@ import streamlit as st
 import db
 import templates
 from ui import common as cm
+from ui import money
 
 STATE_KEY = '_unit_card'   # 현재 열린 호실 id
 
@@ -219,30 +220,33 @@ def _transactions(ctx, unit, ct):
         st.caption("입출금 내역 없음")
     if not editable:
         return
-    with st.form(f"uc_tx_{unit['id']}", clear_on_submit=True):
-        c = st.columns([1.2, 0.8, 1.2, 1.3, 1.2, 1.2])
-        d = c[0].date_input("날짜", value=date.today(), format="YYYY-MM-DD")
-        ttype = c[1].selectbox("구분", ["입금", "출금"])
-        item = c[2].selectbox("입금항목", [''] + cfg['payment_items'])
-        amt = c[3].text_input("금액", placeholder="1,000,000")
-        dep = c[4].text_input("입금자", value=(ct or {}).get('customer_name') or '')
-        acc = c[5].text_input("입금계좌")
-        c2 = st.columns(2)
-        rsn = c2[0].text_input("출금사유")
-        nts = c2[1].text_input("비고")
-        if st.form_submit_button("입출금 추가"):
-            a = cm.parse_amount(amt)
-            if not a:
-                st.error("금액을 숫자로 입력하세요.")
-            elif ttype == '출금' and not rsn.strip():
-                st.error("출금사유를 입력하세요.")
-            else:
-                db.add_transaction(site_id, str(d), depositor=dep.strip() or None,
-                                   customer=(ct or {}).get('customer_name'), account=acc.strip() or None,
-                                   amount=a, tx_type=ttype, notes=nts.strip() or None, unit_id=unit['id'],
-                                   out_reason=rsn.strip() or None if ttype == '출금' else None, item=item or None)
-                cm.flash(f"{ttype} {a:,}원 추가")
-                st.rerun()
+    n = money.round_of(f"_uctx_{unit['id']}")
+    k = f"uctx_{unit['id']}_{n}"
+    name = (ct or {}).get('customer_name') or ''
+    c = st.columns([1.1, 0.8, 1.2, 1.5, 1.1, 1.1])
+    d = c[0].date_input("날짜", value=date.today(), format="YYYY-MM-DD", key=f"{k}_d")
+    ttype = c[1].selectbox("구분", ["입금", "출금"], key=f"{k}_t")
+    item = c[2].selectbox("입금항목", [''] + cfg['payment_items'], key=f"{k}_i")
+    with c[3]:
+        amt = money.money_input("금액", key=f"{k}_a")
+    dep = c[4].text_input("입금자", value=name, key=f"{k}_dep")
+    acc = c[5].text_input("입금계좌", key=f"{k}_acc")
+    c2 = st.columns(2)
+    rsn = c2[0].text_input("출금사유", key=f"{k}_r")
+    nts = c2[1].text_input("비고", key=f"{k}_n")
+    if st.button("입출금 추가", key=f"{k}_save", icon=":material/add:"):
+        if not amt:
+            st.error("금액을 입력하세요.")
+        elif ttype == '출금' and not rsn.strip():
+            st.error("출금사유를 입력하세요.")
+        else:
+            db.add_transaction(site_id, str(d), depositor=dep.strip() or None, customer=name or None,
+                               account=acc.strip() or None, amount=amt, tx_type=ttype, notes=nts.strip() or None,
+                               unit_id=unit['id'], out_reason=(rsn.strip() or None) if ttype == '출금' else None,
+                               item=item or None)
+            money.next_round(f"_uctx_{unit['id']}")
+            cm.flash(f"{ttype} {amt:,}원 추가")
+            st.rerun()
 
 
 def _history(unit):

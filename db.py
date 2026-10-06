@@ -12,6 +12,7 @@ import hashlib
 import hmac
 import secrets
 import calendar
+import json
 from contextlib import contextmanager
 from datetime import date
 
@@ -19,7 +20,7 @@ DB_PATH = os.environ.get('TSWEB_DB_PATH') or os.path.join(
     os.path.dirname(os.path.abspath(__file__)), 'sales_manager.db')
 
 DEFAULT_ADMIN_PASSWORD = 'admin1234'
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 CONTRACT_ACTIVE = '유효'
 CONTRACT_CANCELLED = '해지'
@@ -268,6 +269,16 @@ def init_db():
     _add_column(cur, 'contracts', f"status TEXT DEFAULT '{CONTRACT_ACTIVE}'")
     _add_column(cur, 'contracts', 'cancelled_at DATE')
     _add_column(cur, 'transactions', 'out_reason TEXT')
+    # v3: 현장별 계약 양식 / 확장 계약 항목 / 입금항목
+    _add_column(cur, 'sites', "template TEXT DEFAULT '분양'")
+    _add_column(cur, 'sites', 'config TEXT')
+    _add_column(cur, 'units', 'extra TEXT')
+    _add_column(cur, 'contracts', 'birth_date TEXT')
+    _add_column(cur, 'contracts', 'pre_date DATE')
+    _add_column(cur, 'contracts', 'planned_date DATE')
+    _add_column(cur, 'contracts', 'notes2 TEXT')
+    _add_column(cur, 'contracts', 'extra TEXT')
+    _add_column(cur, 'transactions', 'item TEXT')
 
     # ── 인덱스 ────────────────────────────────────────────────
     _try(cur, """CREATE UNIQUE INDEX IF NOT EXISTS idx_settlement_unique
@@ -279,6 +290,7 @@ def init_db():
     _try(cur, "CREATE INDEX IF NOT EXISTS idx_contract_unit ON contracts(unit_id, status)")
     _try(cur, "CREATE INDEX IF NOT EXISTS idx_tx_site_date ON transactions(site_id, date)")
     _try(cur, "CREATE INDEX IF NOT EXISTS idx_emp_site ON employees(site_id, status)")
+    _try(cur, "CREATE INDEX IF NOT EXISTS idx_tx_unit ON transactions(unit_id)")
 
     # users.site_id → user_sites (구버전 호환)
     _try(cur, """INSERT OR IGNORE INTO user_sites (user_id, site_id)
@@ -305,6 +317,10 @@ def init_db():
                         (rsn or None, nts or None, r['id']))
         # 호실 상태를 유효 계약 기준으로 재동기화 ('해지' 상태 호실은 공실로)
         _resync_unit_status(cur)
+    if version < 3:
+        # 기존 가계약: 계약일을 가계약일로도 기록
+        cur.execute("UPDATE contracts SET pre_date = contract_date WHERE contract_type='가계약' AND pre_date IS NULL")
+    if version < SCHEMA_VERSION:
         cur.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
     # ── 최초 실행: 관리자 계정만 생성 (데모 데이터 없음) ─────────
@@ -364,13 +380,13 @@ def get_site_rates(site_id):
 
 
 def add_site(name, region, start_date, status='진행중',
-             daily_allowance=10000, housing_local=200000, housing_other=300000):
+             daily_allowance=10000, housing_local=200000, housing_other=300000, template='분양', config=None):
     with connect() as conn:
         cur = conn.execute(
             """INSERT INTO sites (name, region, start_date, status,
-                   daily_allowance, housing_local, housing_other)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (name, region, start_date, status, daily_allowance, housing_local, housing_other))
+                   daily_allowance, housing_local, housing_other, template, config)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (name, region, start_date, status, daily_allowance, housing_local, housing_other, template, config))
         return cur.lastrowid
 
 
@@ -382,6 +398,11 @@ def update_site(site_id, name, region, start_date, status,
                    daily_allowance=?, housing_local=?, housing_other=?
                WHERE id=?""",
             (name, region, start_date, status, daily_allowance, housing_local, housing_other, site_id))
+
+
+def update_site_config(site_id, template, config_json):
+    with connect() as conn:
+        conn.execute("UPDATE sites SET template=?, config=? WHERE id=?", (template, config_json, site_id))
 
 
 def site_name_exists(name, exclude_id=None):
@@ -1029,6 +1050,26 @@ _CONTRACT_SELECT = """
     JOIN buildings b ON u.building_id = b.id
 """
 
+# 계약 화면에서 쓰는 컬럼 (extra는 JSON: {"fields": {...}, "docs": {...}})
+CONTRACT_FIELDS = ('customer_name', 'phone', 'birth_date', 'address', 'contract_type', 'pre_date',
+                   'planned_date', 'contract_date', 'deposit_total', 'assigned_team', 'assigned_staff',
+                   'notes', 'notes2', 'extra')
+
+
+def _jload(v):
+    if not v:
+        return {}
+    if isinstance(v, dict):
+        return v
+    try:
+        return json.loads(v)
+    except (ValueError, TypeError):
+        return {}
+
+
+def _jdump(v):
+    return json.dumps(v, ensure_ascii=False) if v else None
+
 
 def get_contracts(site_id=None, unit_id=None, contract_type=None, active_only=False):
     query = _CONTRACT_SELECT + " WHERE 1=1"
@@ -1062,50 +1103,63 @@ def get_contract(contract_id):
         return _one(conn.execute(_CONTRACT_SELECT + " WHERE ct.id=?", (contract_id,)))
 
 
+def _contract_values(data):
+    vals = {k: data.get(k) for k in CONTRACT_FIELDS if k in data}
+    if 'extra' in vals and not isinstance(vals['extra'], (str, type(None))):
+        vals['extra'] = _jdump(vals['extra'])
+    return vals
+
+
+def _insert_contract(conn, unit_id, site_id, data):
+    dup = conn.execute(f"SELECT id FROM contracts WHERE unit_id=? AND status='{CONTRACT_ACTIVE}'",
+                       (unit_id,)).fetchone()
+    if dup:
+        raise ValueError("이미 유효한 계약이 있는 호실입니다.")
+    vals = _contract_values(data)
+    if not vals.get('contract_type'):
+        vals['contract_type'] = '가계약'
+    cols = ['unit_id', 'site_id', 'status'] + list(vals)
+    cur = conn.execute(f"INSERT INTO contracts ({', '.join(cols)}) VALUES ({', '.join('?' * len(cols))})",
+                       [unit_id, site_id, CONTRACT_ACTIVE] + list(vals.values()))
+    conn.execute("UPDATE units SET status=? WHERE id=?", (vals['contract_type'], unit_id))
+    return cur.lastrowid
+
+
+def _update_contract(conn, contract_id, data):
+    vals = _contract_values(data)
+    if vals:
+        conn.execute(f"UPDATE contracts SET {', '.join(f'{k}=?' for k in vals)} WHERE id=?",
+                     list(vals.values()) + [contract_id])
+    row = conn.execute("SELECT unit_id, status, contract_type FROM contracts WHERE id=?", (contract_id,)).fetchone()
+    if row and row['status'] == CONTRACT_ACTIVE:
+        conn.execute("UPDATE units SET status=? WHERE id=?", (row['contract_type'], row['unit_id']))
+
+
 def add_contract(unit_id, site_id, customer_name, phone=None, address=None,
                  contract_type='가계약', contract_date=None, deposit_total=0,
-                 assigned_team=None, assigned_staff=None, notes=None, sale_price=None):
+                 assigned_team=None, assigned_staff=None, notes=None, sale_price=None, **more):
     """신규 계약. 유효 계약이 이미 있으면 ValueError."""
+    data = dict(customer_name=customer_name, phone=phone, address=address, contract_type=contract_type,
+                contract_date=contract_date, deposit_total=deposit_total, assigned_team=assigned_team,
+                assigned_staff=assigned_staff, notes=notes, **more)
     with connect() as conn:
-        dup = conn.execute(f"SELECT id FROM contracts WHERE unit_id=? AND status='{CONTRACT_ACTIVE}'",
-                           (unit_id,)).fetchone()
-        if dup:
-            raise ValueError("이미 유효한 계약이 있는 호실입니다.")
-        cur = conn.execute(f"""
-            INSERT INTO contracts
-                (unit_id, site_id, customer_name, phone, address,
-                 contract_type, contract_date, deposit_total,
-                 assigned_team, assigned_staff, notes, status)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '{CONTRACT_ACTIVE}')
-        """, (unit_id, site_id, customer_name, phone, address,
-              contract_type, contract_date, deposit_total,
-              assigned_team, assigned_staff, notes))
-        new_id = cur.lastrowid
+        new_id = _insert_contract(conn, unit_id, site_id, data)
         if sale_price is not None:
             conn.execute("UPDATE units SET sale_price=? WHERE id=?", (sale_price, unit_id))
-        conn.execute("UPDATE units SET status=? WHERE id=?", (contract_type, unit_id))
         return new_id
 
 
 def update_contract(contract_id, customer_name, phone=None, address=None,
                     contract_type='가계약', contract_date=None, deposit_total=0,
-                    assigned_team=None, assigned_staff=None, notes=None, sale_price=None):
+                    assigned_team=None, assigned_staff=None, notes=None, sale_price=None, **more):
+    data = dict(customer_name=customer_name, phone=phone, address=address, contract_type=contract_type,
+                contract_date=contract_date, deposit_total=deposit_total, assigned_team=assigned_team,
+                assigned_staff=assigned_staff, notes=notes, **more)
     with connect() as conn:
-        conn.execute("""
-            UPDATE contracts
-            SET customer_name=?, phone=?, address=?,
-                contract_type=?, contract_date=?, deposit_total=?,
-                assigned_team=?, assigned_staff=?, notes=?
-            WHERE id=?
-        """, (customer_name, phone, address,
-              contract_type, contract_date, deposit_total,
-              assigned_team, assigned_staff, notes, contract_id))
-        row = conn.execute("SELECT unit_id, status FROM contracts WHERE id=?", (contract_id,)).fetchone()
-        if row:
-            if sale_price is not None:
-                conn.execute("UPDATE units SET sale_price=? WHERE id=?", (sale_price, row[0]))
-            if row[1] == CONTRACT_ACTIVE:
-                conn.execute("UPDATE units SET status=? WHERE id=?", (contract_type, row[0]))
+        _update_contract(conn, contract_id, data)
+        if sale_price is not None:
+            conn.execute("UPDATE units SET sale_price=? WHERE id=(SELECT unit_id FROM contracts WHERE id=?)",
+                         (sale_price, contract_id))
 
 
 def delete_contract(contract_id):
@@ -1115,6 +1169,82 @@ def delete_contract(contract_id):
         conn.execute("DELETE FROM contracts WHERE id=?", (contract_id,))
         if row:
             _resync_unit_status(conn.cursor(), [row[0]])
+
+
+# ===================================================================
+# 계약관리 시트 (엑셀 main 시트: 호실 1행 = 호실 + 유효계약 + 입금 집계)
+# ===================================================================
+
+def unit_extra(u):
+    return _jload(u.get('extra'))
+
+
+def get_site_sheet(site_id):
+    """현장 전체 호실 + 유효 계약 + 입출금 집계를 한 번에 조회."""
+    with connect() as conn:
+        units = _rows(conn.execute(_UNIT_SELECT + " WHERE u.site_id=? ORDER BY c.complex_no, "
+                                   "CAST(b.building_no AS INTEGER), b.building_no, u.floor, u.unit_no",
+                                   (site_id,)))
+        contracts = {r['unit_id']: r for r in _rows(conn.execute(
+            f"SELECT * FROM contracts WHERE site_id=? AND status='{CONTRACT_ACTIVE}' ORDER BY id", (site_id,)))}
+        totals = {r['unit_id']: r for r in _rows(conn.execute("""
+            SELECT unit_id,
+                   SUM(CASE WHEN type='입금' THEN amount ELSE 0 END) AS paid_in,
+                   SUM(CASE WHEN type='출금' THEN amount ELSE 0 END) AS paid_out
+            FROM transactions WHERE site_id=? AND unit_id IS NOT NULL GROUP BY unit_id""", (site_id,)))}
+        items = {}
+        for r in conn.execute("""
+            SELECT unit_id, item,
+                   SUM(CASE WHEN type='입금' THEN amount ELSE -amount END) AS amt, MIN(date) AS first_date
+            FROM transactions
+            WHERE site_id=? AND unit_id IS NOT NULL AND item IS NOT NULL AND item<>''
+            GROUP BY unit_id, item""", (site_id,)):
+            items.setdefault(r['unit_id'], {})[r['item']] = (r['amt'], r['first_date'])
+    for u in units:
+        u['extra_d'] = _jload(u.get('extra'))
+        ct = contracts.get(u['id'])
+        if ct:
+            ct['extra_d'] = _jload(ct.get('extra'))
+        u['contract'] = ct
+        t = totals.get(u['id']) or {}
+        u['paid_in'] = t.get('paid_in') or 0
+        u['paid_out'] = t.get('paid_out') or 0
+        u['items'] = items.get(u['id'], {})
+    return units
+
+
+def apply_sheet_changes(site_id, changes):
+    """계약관리 표 편집 반영 (한 트랜잭션).
+    changes: [{'unit_id', 'unit': {가격 key 또는 'type': 값}, 'contract': {CONTRACT_FIELDS...} | None}]
+    유효 계약이 있으면 수정, 없고 계약자명이 있으면 신규 등록.
+    반환: (신규, 수정, 호실정보 수정)"""
+    n_new = n_upd = n_unit = 0
+    with connect() as conn:
+        for ch in changes:
+            uid = ch['unit_id']
+            if ch.get('unit'):
+                row = conn.execute("SELECT extra FROM units WHERE id=? AND site_id=?", (uid, site_id)).fetchone()
+                if not row:
+                    continue
+                extra = _jload(row['extra'])
+                for k, v in ch['unit'].items():
+                    if k in ('sale_price', 'rental_price', 'type'):
+                        conn.execute(f"UPDATE units SET {k}=? WHERE id=?", (v, uid))
+                    else:
+                        extra[k] = v
+                conn.execute("UPDATE units SET extra=? WHERE id=?", (_jdump(extra), uid))
+                n_unit += 1
+            data = ch.get('contract')
+            if data:
+                ct = conn.execute(f"SELECT id FROM contracts WHERE unit_id=? AND status='{CONTRACT_ACTIVE}'",
+                                  (uid,)).fetchone()
+                if ct:
+                    _update_contract(conn, ct['id'], data)
+                    n_upd += 1
+                elif (data.get('customer_name') or '').strip():
+                    _insert_contract(conn, uid, site_id, data)
+                    n_new += 1
+    return n_new, n_upd, n_unit
 
 
 # ===================================================================
@@ -1159,25 +1289,25 @@ def get_transaction(tx_id):
 
 
 def add_transaction(site_id, date, depositor=None, customer=None, account=None,
-                    amount=0, tx_type='입금', notes=None, unit_id=None, out_reason=None):
+                    amount=0, tx_type='입금', notes=None, unit_id=None, out_reason=None, item=None):
     with connect() as conn:
         cur = conn.execute("""
             INSERT INTO transactions
-                (unit_id, site_id, date, depositor, customer, account, amount, type, notes, out_reason)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (unit_id, site_id, date, depositor, customer, account, amount, tx_type, notes, out_reason))
+                (unit_id, site_id, date, depositor, customer, account, amount, type, notes, out_reason, item)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (unit_id, site_id, date, depositor, customer, account, amount, tx_type, notes, out_reason, item))
         return cur.lastrowid
 
 
 def update_transaction(tx_id, date, depositor=None, customer=None, account=None,
-                       amount=0, tx_type='입금', notes=None, unit_id=None, out_reason=None):
+                       amount=0, tx_type='입금', notes=None, unit_id=None, out_reason=None, item=None):
     with connect() as conn:
         conn.execute("""
             UPDATE transactions
             SET unit_id=?, date=?, depositor=?, customer=?,
-                account=?, amount=?, type=?, notes=?, out_reason=?
+                account=?, amount=?, type=?, notes=?, out_reason=?, item=?
             WHERE id=?
-        """, (unit_id, date, depositor, customer, account, amount, tx_type, notes, out_reason, tx_id))
+        """, (unit_id, date, depositor, customer, account, amount, tx_type, notes, out_reason, item, tx_id))
 
 
 def delete_transaction(tx_id):

@@ -1,16 +1,33 @@
 [client]
 showSidebarNavigation = false
+toolbarMode = "minimal"
 
 [theme]
-primaryColor = "#1f77b4"
-backgroundColor = "#ffffff"
-secondaryBackgroundColor = "#f0f2f6"
-textColor = "#262730"
-font = "sans serif"
+base = "light"
+font = "Noto Sans KR:https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;500;700&display=swap"
+baseFontSize = 14
+primaryColor = "#1F4E8C"
+backgroundColor = "#F3F5F8"
+secondaryBackgroundColor = "#E9EDF2"
+textColor = "#1F2937"
+borderColor = "#D5DBE3"
+showWidgetBorder = true
+baseRadius = "4px"
+buttonRadius = "4px"
+dataframeHeaderBackgroundColor = "#EEF1F5"
+dataframeBorderColor = "#DDE2E9"
+metricValueFontSize = "22px"
+showSidebarBorder = true
+
+[theme.sidebar]
+backgroundColor = "#17212F"
+secondaryBackgroundColor = "#223045"
+textColor = "#C9D3E0"
+primaryColor = "#6EA8FE"
+borderColor = "#2C3B52"
 
 [server]
 headless = true
-enableCORS = false
 
 [browser]
 gatherUsageStats = false

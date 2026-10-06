@@ -1,98 +1,56 @@
-﻿import streamlit as st
+import streamlit as st
 from datetime import date
 import db
 import sidebar
 
-st.set_page_config(page_title="해지", page_icon="❌", layout="wide")
+user = sidebar.page_setup("해지", "❌", roles=sidebar.EDIT_ROLES)
+sidebar.show_flash()
 
-sidebar.require_login()
-
-user = st.session_state.user
-
-if user['role'] == 'viewer':
-    st.error("접근 권한이 없습니다.")
-    st.stop()
-
-sidebar.render_sidebar(user)
-
-st.title("❌ 해지")
-
-if st.session_state.get("_cancel_ok"):
-    st.success(st.session_state.pop("_cancel_ok"))
-
-# ── 현장 선택 ─────────────────────────────────────────────────────
-all_sites = db.get_all_sites()
-if not all_sites:
-    st.info("등록된 현장이 없습니다.")
-    st.stop()
-
-accessible = sidebar.get_accessible_sites(user, all_sites)
-if not accessible:
-    st.error("담당 현장이 배정되지 않았습니다. 관리자에게 문의하세요.")
-    st.stop()
-elif len(accessible) == 1:
-    site_id = accessible[0]['id']
-    st.caption(f"현장: **{accessible[0]['name']}**")
-else:
-    site_map = {s['name']: s['id'] for s in accessible}
-    sel_site = st.selectbox("현장 선택", list(site_map.keys()))
-    site_id = site_map[sel_site]
-
-# ── 동/호수 선택 (가계약/계약 상태만) ────────────────────────────
-buildings = db.get_buildings(site_id=site_id)
-if not buildings:
-    st.info("등록된 동이 없습니다.")
-    st.stop()
+site_id, site, _ = sidebar.select_site(user)
 
 c1, c2 = st.columns(2)
-bld_map = {b['building_no'] + '동': b['id'] for b in buildings}
-sel_bld = c1.selectbox("동 선택", list(bld_map.keys()))
-bld_id = bld_map[sel_bld]
-
-units = db.get_units(site_id=site_id, building_id=bld_id)
-units = [u for u in units if u.get('status') in ('가계약', '계약')]
+bld_id, _ = sidebar.select_building(site_id, container=c1)
+units = [u for u in db.get_units(site_id=site_id, building_id=bld_id) if u['status'] in ('가계약', '계약')]
 if not units:
     c2.warning("해지 가능한 호실이 없습니다. (가계약/계약 상태 호실만 선택 가능)")
     st.stop()
+unit = sidebar.select_unit(units, container=c2)
 
-unit_map = {u['unit_no']: u for u in units}
-sel_unit_no = c2.selectbox("호수 선택", list(unit_map.keys()))
-unit = unit_map[sel_unit_no]
+contract = db.get_active_contract(unit['id'])
+if not contract:
+    st.error("이 호실에 유효한 계약 기록이 없습니다. 관리자에게 '데이터 점검'을 요청하세요.")
+    st.stop()
 
-st.info(
-    f"**선택 호실:** {unit['complex_name']} {unit['building_no']}동 "
-    f"{unit['unit_no']}　｜　현재 상태: {unit.get('status', '-')}"
-)
+txs = db.get_transactions(unit_id=unit['id'])
+paid = sum(t['amount'] for t in txs if t['type'] == '입금') - sum(t['amount'] for t in txs if t['type'] == '출금')
 
-contracts = db.get_contracts(unit_id=unit["id"])
-contract_id = contracts[0]["id"] if contracts else None
+st.info(f"**선택 호실:** {sidebar.unit_title(unit)}　｜　{contract['contract_type']}　｜　"
+        f"계약자 {contract['customer_name']} ({contract.get('phone') or '-'})　｜　계약일 {contract.get('contract_date') or '-'}　｜　"
+        f"계약금 {(contract.get('deposit_total') or 0):,}원　｜　입금 잔액 {paid:,}원")
 
-# ── 입력 폼 ──────────────────────────────────────────────────────
-with st.form("form_cancel", clear_on_submit=True):
+with st.form(f"form_cancel_{contract['id']}", clear_on_submit=True):
     r1c1, r1c2 = st.columns(2)
     cancel_date = r1c1.date_input("해지접수일", value=date.today())
     refund_bank = r1c2.text_input("환불은행")
-
     r2c1, r2c2 = st.columns(2)
     account_no = r2c1.text_input("계좌번호")
-    refund_amount = r2c2.number_input(
-        "환불금액 (원)", value=0, step=100_000, min_value=0, format="%d"
-    )
+    refund_amount = r2c2.number_input("환불금액 (원)", value=0, step=100_000, min_value=0, format="%d",
+                                      help=f"참고: 현재 입금 잔액 {paid:,}원")
+    notes = st.text_area("비고 (해지 사유 등)", height=80)
+    confirm = st.checkbox(f"{contract['customer_name']} 님의 계약을 해지하고 호실을 공실로 전환합니다.")
 
-    notes = st.text_area("비고", height=80)
+    if st.form_submit_button("❌ 해지 처리", type="primary", width="stretch"):
+        if not confirm:
+            st.error("확인 체크박스를 선택하세요.")
+        else:
+            try:
+                db.cancel_contract(contract['id'], cancel_date=str(cancel_date), refund_amount=int(refund_amount),
+                                   bank=refund_bank.strip() or None, account_no=account_no.strip() or None,
+                                   notes=notes.strip() or None)
+            except ValueError as e:
+                st.error(str(e))
+            else:
+                sidebar.flash(f"✅ 해지 처리 완료: {sidebar.unit_title(unit)} — {contract['customer_name']}")
+                st.rerun()
 
-    if st.form_submit_button("❌ 해지 처리", type="primary", use_container_width=True):
-        db.add_cancellation(
-            unit_id=unit["id"],
-            contract_id=contract_id,
-            cancel_date=str(cancel_date),
-            refund_amount=refund_amount,
-            bank=refund_bank.strip() or None,
-            account_no=account_no.strip() or None,
-            notes=notes.strip() or None,
-        )
-        db.update_unit_status(unit["id"], "공실")
-        st.session_state["_cancel_ok"] = (
-            f"✅ 해지 처리 완료: {unit['building_no']}동 {unit['unit_no']}"
-        )
-        st.rerun()
+st.caption("환불 출금은 '입출금 등록'에서 출금으로 따로 기록하세요.")

@@ -1,17 +1,5 @@
-﻿import streamlit as st
+import streamlit as st
 import sidebar
 
-st.set_page_config(page_title="기본 정산", page_icon="📊", layout="wide")
-
-sidebar.require_login()
-
-user = st.session_state.user
-
-if user['role'] == 'viewer':
-    st.error("접근 권한이 없습니다.")
-    st.stop()
-
-sidebar.render_sidebar(user)
-
-st.title("📊 기본 정산")
-st.info("🚧 준비중입니다.")
+user = sidebar.page_setup("기본 정산", "📊", roles=sidebar.EDIT_ROLES)
+st.info("🚧 준비중입니다. 산정 기준(지급 대상·요율·집행일)이 정해지면 구현합니다.")

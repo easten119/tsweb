@@ -1,263 +1,131 @@
-import io
 import streamlit as st
 import pandas as pd
 from datetime import date
 import db
 import sidebar
 
-st.set_page_config(page_title="해지 리스트", page_icon="📋", layout="wide")
+user = sidebar.page_setup("해지 리스트", "📋")
+editable = sidebar.can_edit(user)
+sidebar.show_flash()
 
-sidebar.require_login()
+site_id, site, _ = sidebar.select_site(user)
 
-user = st.session_state.user
-sidebar.render_sidebar(user)
-
-st.title("📋 해지 리스트")
-
-# ── 금액 입력 헬퍼 ─────────────────────────────────────────────────
-def _fmt_key(key):
-    raw = st.session_state.get(key, "")
-    cleaned = str(raw).replace(",", "").replace(" ", "")
-    if cleaned and cleaned.isdigit():
-        st.session_state[key] = f"{int(cleaned):,}"
-
-def parse_amount(text):
-    cleaned = str(text or "").replace(",", "").replace(" ", "")
-    if not cleaned:
-        return 0
-    if not cleaned.isdigit():
-        return None
-    return int(cleaned)
-
-# ── 현장 선택 ─────────────────────────────────────────────────────
-all_sites = db.get_all_sites()
-if not all_sites:
-    st.info("등록된 현장이 없습니다.")
-    st.stop()
-
-accessible = sidebar.get_accessible_sites(user, all_sites)
-if not accessible:
-    st.error("담당 현장이 배정되지 않았습니다. 관리자에게 문의하세요.")
-    st.stop()
-elif len(accessible) == 1:
-    site_id = accessible[0]['id']
-    st.caption(f"현장: **{accessible[0]['name']}**")
-else:
-    site_map = {s['name']: s['id'] for s in accessible}
-    sel_site = st.selectbox("현장 선택", list(site_map.keys()))
-    site_id = site_map[sel_site]
-
-# ── 필터 ─────────────────────────────────────────────────────────
 today = date.today()
-fc1, fc2, fc3 = st.columns([2, 2, 2])
-start_date = fc1.date_input("시작일 (해지접수일)", value=today.replace(day=1))
-end_date   = fc2.date_input("종료일 (해지접수일)", value=today)
+fc1, fc2, fc3 = st.columns(3)
+start_date = fc1.date_input("시작일 (해지접수일)", value=date(today.year, 1, 1))
+end_date = fc2.date_input("종료일 (해지접수일)", value=today)
+bld_filter, _ = sidebar.select_building(site_id, key="cl_bld", label="동 필터", container=fc3, include_all=True)
 
-buildings = db.get_buildings(site_id=site_id)
-bld_options = ["전체"] + [b['building_no'] + "동" for b in buildings]
-sel_bld_filter = fc3.selectbox("동 필터", bld_options)
-
-# ── 데이터 조회 ───────────────────────────────────────────────────
-cancels_all = db.get_cancellations(site_id=site_id)
-cancels_all = [
-    c for c in cancels_all
-    if str(start_date) <= str(c.get('cancel_date') or '') <= str(end_date)
-]
-
-if sel_bld_filter != "전체":
-    bld_no = sel_bld_filter.replace("동", "")
-    cancels_all = [c for c in cancels_all if str(c.get('building_no', '')) == bld_no]
-
-# 해지접수일 최신순
-cancels_all = sorted(cancels_all, key=lambda x: x.get('cancel_date') or '', reverse=True)
+cancels = [c for c in db.get_cancellations(site_id=site_id)
+           if str(start_date) <= str(c.get('cancel_date') or '') <= str(end_date)]
+if bld_filter:
+    unit_ids = {u['id'] for u in db.get_units(site_id=site_id, building_id=bld_filter)}
+    cancels = [c for c in cancels if c['unit_id'] in unit_ids]
 
 # ── 수정 폼 ──────────────────────────────────────────────────────
-edit_cancel_id = st.session_state.get('edit_cancel_id')
-if edit_cancel_id:
-    ce = next((c for c in cancels_all if c['id'] == edit_cancel_id), None)
-    if ce is None:
-        ce = db.get_cancellation(edit_cancel_id)
-
-    if ce:
-        bno = str(ce.get('building_no') or '')
-        uno = str(ce.get('unit_no') or '')
-        dong_ho = f"{bno}동 {uno}" if bno else uno
-        st.subheader("✏️ 해지 수정")
-        st.caption(f"대상: {dong_ho} | ID: {edit_cancel_id}")
-
-        amt_key  = f"edt_refund_{edit_cancel_id}"
-        bank_key = f"edt_bank_{edit_cancel_id}"
-        acno_key = f"edt_acno_{edit_cancel_id}"
-        nts_key  = f"edt_nts_{edit_cancel_id}"
-
-        # 첫 렌더링 시 초기화
-        if amt_key not in st.session_state:
-            st.session_state[amt_key]  = f"{ce.get('refund_amount', 0):,}"
-            st.session_state[bank_key] = ce.get('bank') or ''
-            st.session_state[acno_key] = ce.get('account_no') or ''
-            st.session_state[nts_key]  = ce.get('notes') or ''
-
-        ec1, ec2 = st.columns(2)
-        ec1.date_input(
-            "해지접수일",
-            value=date.fromisoformat(str(ce['cancel_date'])) if ce.get('cancel_date') else date.today(),
-            key=f"edt_cdate_{edit_cancel_id}",
-        )
-        ec2.text_input("환불은행", key=bank_key)
-
-        ec3, ec4 = st.columns(2)
-        ec3.text_input("계좌번호", key=acno_key)
-        ec4.text_input(
-            "환불금액 (원)",
-            key=amt_key,
-            placeholder="예: 1,000,000",
-            on_change=_fmt_key,
-            args=(amt_key,),
-        )
-
-        st.text_area("비고", key=nts_key, height=80)
-
-        sv_col, cx_col, _ = st.columns([1, 1, 4])
-        if sv_col.button("💾 수정 저장", type="primary", key="btn_cedit_save"):
-            new_refund = parse_amount(st.session_state.get(amt_key, ""))
-            if new_refund is None:
-                st.error("환불금액: 숫자 외 문자가 포함되어 있습니다.")
+edit_id = st.session_state.get('edit_cancel_id')
+if edit_id and editable:
+    ce = db.get_cancellation(edit_id)
+    if not ce or ce['site_id'] != site_id:
+        st.session_state.pop('edit_cancel_id', None)
+    else:
+        st.subheader("✏️ 해지 내역 수정")
+        st.caption(f"대상: {ce.get('building_no')}동 {ce.get('unit_no')} | {ce.get('customer_name') or '-'}")
+        k = lambda n: f"edt_c_{n}_{edit_id}"  # noqa: E731
+        if k('init') not in st.session_state:
+            st.session_state[k('init')] = True
+            st.session_state[k('amt')] = f"{ce.get('refund_amount') or 0:,}"
+            st.session_state[k('bank')] = ce.get('bank') or ''
+            st.session_state[k('acno')] = ce.get('account_no') or ''
+            st.session_state[k('nts')] = ce.get('notes') or ''
+        e1, e2 = st.columns(2)
+        new_date = e1.date_input("해지접수일", key=k('date'),
+                                 value=date.fromisoformat(ce['cancel_date']) if ce.get('cancel_date') else today)
+        e2.text_input("환불은행", key=k('bank'))
+        e3, e4 = st.columns(2)
+        e3.text_input("계좌번호", key=k('acno'))
+        e4.text_input("환불금액 (원)", key=k('amt'), on_change=sidebar.fmt_amount_key, args=(k('amt'),))
+        st.text_area("비고", key=k('nts'), height=80)
+        s1, s2, _ = st.columns([1, 1, 4])
+        if s1.button("💾 수정 저장", type="primary"):
+            amt = sidebar.parse_amount(st.session_state[k('amt')])
+            if amt is None:
+                st.error("환불금액은 숫자로 입력하세요.")
             else:
-                new_cdate = st.session_state.get(
-                    f"edt_cdate_{edit_cancel_id}", date.today()
-                )
-                db.update_cancellation(
-                    cancel_id=edit_cancel_id,
-                    cancel_date=str(new_cdate),
-                    refund_amount=new_refund,
-                    bank=st.session_state.get(bank_key, "").strip() or None,
-                    account_no=st.session_state.get(acno_key, "").strip() or None,
-                    notes=st.session_state.get(nts_key, "").strip() or None,
-                )
+                db.update_cancellation(edit_id, cancel_date=str(new_date), refund_amount=amt,
+                                       bank=st.session_state[k('bank')].strip() or None,
+                                       account_no=st.session_state[k('acno')].strip() or None,
+                                       notes=st.session_state[k('nts')].strip() or None)
                 st.session_state.pop('edit_cancel_id', None)
-                st.session_state['_clist_ok'] = "✅ 수정 완료"
+                sidebar.flash("✅ 수정 완료")
                 st.rerun()
-
-        if cx_col.button("❌ 취소", key="btn_cedit_cancel"):
+        if s2.button("취소"):
             st.session_state.pop('edit_cancel_id', None)
             st.rerun()
-
         st.markdown("---")
+
+# ── 해지 취소 확인 ────────────────────────────────────────────────
+undo_id = st.session_state.get('undo_cancel_id')
+if undo_id and editable and not edit_id:
+    cd = db.get_cancellation(undo_id)
+    if not cd or cd['site_id'] != site_id:
+        st.session_state.pop('undo_cancel_id', None)
     else:
-        st.warning("수정할 해지 내역을 찾을 수 없습니다.")
-        st.session_state.pop('edit_cancel_id', None)
-
-# ── 삭제 확인 ────────────────────────────────────────────────────
-del_cancel_id = st.session_state.get('del_cancel_id')
-if del_cancel_id and not edit_cancel_id:
-    cd = next((c for c in cancels_all if c['id'] == del_cancel_id), None)
-    if cd is None:
-        cd = db.get_cancellation(del_cancel_id)
-
-    if cd:
-        bno = str(cd.get('building_no') or '')
-        uno = str(cd.get('unit_no') or '')
-        dong_ho_d = f"{bno}동 {uno}" if bno else uno
-        st.warning(
-            f"**삭제 확인:** {cd.get('cancel_date', '-')} | {dong_ho_d} | "
-            f"{cd.get('customer_name', '-')} | 환불 {cd.get('refund_amount', 0):,}원  \n"
-            f"삭제 후 해당 호실 상태가 **'공실'**로 변경됩니다."
-        )
-        confirm_del = st.checkbox(
-            "위 해지 내역을 삭제하고 호실 상태를 '공실'로 되돌립니다. (취소 불가)",
-            key="del_cancel_chk",
-        )
-        dc1, dc2, _ = st.columns([1, 1, 4])
-        if dc1.button("🗑️ 삭제 확인", type="primary", disabled=not confirm_del, key="btn_cdel_ok"):
-            db.delete_cancellation(del_cancel_id)
-            st.session_state.pop('del_cancel_id', None)
-            st.session_state.pop('del_cancel_chk', None)
-            st.session_state['_clist_ok'] = "🗑️ 삭제 완료 (호실 상태 → 공실)"
+        st.warning(f"**해지 취소:** {cd.get('cancel_date')} | {cd.get('building_no')}동 {cd.get('unit_no')} | "
+                   f"{cd.get('customer_name') or '-'}  \n해지 내역을 지우고 원래 계약을 다시 유효 상태로 되돌립니다.")
+        ok = st.checkbox("해지를 취소합니다.", key="undo_chk")
+        u1, u2, _ = st.columns([1, 1, 4])
+        if u1.button("↩️ 해지 취소 확인", type="primary", disabled=not ok):
+            success, msg = db.delete_cancellation(undo_id)
+            st.session_state.pop('undo_cancel_id', None)
+            st.session_state.pop('undo_chk', None)
+            sidebar.flash(msg, "success" if success else "error")
             st.rerun()
-        if dc2.button("❌ 취소", key="btn_cdel_cancel"):
-            st.session_state.pop('del_cancel_id', None)
+        if u2.button("닫기"):
+            st.session_state.pop('undo_cancel_id', None)
             st.rerun()
         st.markdown("---")
-    else:
-        st.session_state.pop('del_cancel_id', None)
 
-# ── 알림 ─────────────────────────────────────────────────────────
-if st.session_state.get("_clist_ok"):
-    st.success(st.session_state.pop("_clist_ok"))
-
-if not cancels_all:
+if not cancels:
     st.info("조건에 맞는 해지 내역이 없습니다.")
     st.stop()
 
-# ── 테이블 ────────────────────────────────────────────────────────
-COL_W   = [0.6, 0.7, 0.8, 1.0, 1.3, 1.1, 1.1, 1.4, 1.2, 1.6, 0.5, 0.5]
-HEADERS = ["동", "호수", "타입", "해지접수일", "계약자명", "연락처",
-           "환불은행", "계좌번호", "환불금액", "비고", "", ""]
+df = pd.DataFrame([{
+    "동": f"{c.get('building_no')}동", "호수": c.get('unit_no') or '', "타입": c.get('unit_type') or '',
+    "해지접수일": c.get('cancel_date') or '', "계약자명": c.get('customer_name') or '(계약정보 없음)',
+    "연락처": c.get('phone') or '', "계약일": c.get('contract_date') or '', "환불은행": c.get('bank') or '',
+    "계좌번호": c.get('account_no') or '', "환불금액": c.get('refund_amount') or 0, "비고": c.get('notes') or '',
+} for c in cancels])
 
-hdr_cols = st.columns(COL_W)
-for label, col in zip(HEADERS, hdr_cols):
-    col.markdown(f"**{label}**")
-st.markdown("---")
+st.markdown(f"총 **{len(df)}**건")
+event = st.dataframe(df, width="stretch", hide_index=True,
+                     on_select="rerun" if editable else "ignore", selection_mode="single-row",
+                     column_config={"환불금액": st.column_config.NumberColumn(format="localized")})
 
-for c in cancels_all:
-    row = st.columns(COL_W)
-    row[0].write(str(c.get('building_no') or ''))
-    row[1].write(str(c.get('unit_no') or ''))
-    row[2].write(str(c.get('unit_type') or ''))
-    row[3].write(str(c.get('cancel_date') or ''))
-    row[4].write(str(c.get('customer_name') or ''))
-    row[5].write(str(c.get('phone') or ''))
-    row[6].write(str(c.get('bank') or ''))
-    row[7].write(str(c.get('account_no') or ''))
-    row[8].write(f"{c.get('refund_amount', 0) or 0:,}")
-    row[9].write(str(c.get('notes') or ''))
-
-    if row[10].button("✏️", key=f"cedit_{c['id']}", help="수정"):
-        for k in list(st.session_state.keys()):
-            if k.startswith('edt_'):
-                del st.session_state[k]
-        st.session_state['edit_cancel_id'] = c['id']
-        st.session_state.pop('del_cancel_id', None)
-        st.rerun()
-
-    if row[11].button("🗑️", key=f"cdel_{c['id']}", help="삭제"):
-        st.session_state['del_cancel_id'] = c['id']
-        st.session_state.pop('edit_cancel_id', None)
-        st.rerun()
+if editable:
+    sel = event.selection.rows if hasattr(event, 'selection') else []
+    if sel:
+        c = cancels[sel[0]]
+        st.info(f"선택: {c.get('cancel_date')} | {c.get('building_no')}동 {c.get('unit_no')} | "
+                f"{c.get('customer_name') or '-'}")
+        a1, a2, _ = st.columns([1, 1.4, 6])
+        if a1.button("✏️ 수정"):
+            for key in [x for x in st.session_state if str(x).startswith('edt_c_')]:
+                del st.session_state[key]
+            st.session_state['edit_cancel_id'] = c['id']
+            st.session_state.pop('undo_cancel_id', None)
+            st.rerun()
+        if a2.button("↩️ 해지 취소"):
+            st.session_state['undo_cancel_id'] = c['id']
+            st.session_state.pop('edit_cancel_id', None)
+            st.rerun()
+    else:
+        st.caption("행을 클릭하면 수정 / 해지 취소 버튼이 나타납니다.")
 
 st.markdown("---")
-
-# ── 요약 ─────────────────────────────────────────────────────────
-total_count  = len(cancels_all)
-total_refund = sum(c.get('refund_amount', 0) or 0 for c in cancels_all)
 m1, m2 = st.columns(2)
-m1.metric("총 해지 건수", f"{total_count}건")
-m2.metric("총 환불액",   f"{total_refund:,}원")
+m1.metric("총 해지 건수", f"{len(df)}건")
+m2.metric("총 환불액", f"{int(df['환불금액'].sum()):,}원")
 
-# ── 엑셀 다운로드 ─────────────────────────────────────────────────
-excel_rows = []
-for c in cancels_all:
-    excel_rows.append({
-        "동":       c.get('building_no') or '',
-        "호수":     c.get('unit_no') or '',
-        "타입":     c.get('unit_type') or '',
-        "해지접수일": c.get('cancel_date') or '',
-        "계약자명": c.get('customer_name') or '',
-        "연락처":   c.get('phone') or '',
-        "환불은행": c.get('bank') or '',
-        "계좌번호": c.get('account_no') or '',
-        "환불금액": c.get('refund_amount', 0) or 0,
-        "비고":     c.get('notes') or '',
-    })
-
-df_excel = pd.DataFrame(excel_rows)
-buf = io.BytesIO()
-with pd.ExcelWriter(buf, engine='openpyxl') as writer:
-    df_excel.to_excel(writer, index=False, sheet_name='해지리스트')
-buf.seek(0)
-st.download_button(
-    "📥 엑셀 다운로드",
-    data=buf,
-    file_name=f"해지리스트_{start_date}_{end_date}.xlsx",
-    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-)
+st.download_button("📥 엑셀 다운로드", data=sidebar.excel_bytes({'해지리스트': df}),
+                   file_name=f"해지리스트_{site['name']}_{start_date}_{end_date}.xlsx", mime=sidebar.XLSX_MIME)

@@ -1,91 +1,61 @@
-﻿import io
 import streamlit as st
 import pandas as pd
 import db
 import sidebar
 
-st.set_page_config(page_title="계약 리스트", page_icon="📋", layout="wide")
+user = sidebar.page_setup("계약 리스트", "📋")
 
-sidebar.require_login()
+site_id, site, _ = sidebar.select_site(user)
 
-user = st.session_state.user
-sidebar.render_sidebar(user)
+fc1, fc2, fc3 = st.columns(3)
+type_filter = fc1.selectbox("계약구분", ["전체", "가계약", "계약"])
+status_filter = fc2.selectbox("계약상태", ["유효 계약만", "해지 포함 전체", "해지된 계약만"])
+employees = db.get_employees(site_id, include_retired=True)
+teams = ["전체"] + sorted({e['team'] for e in employees if e.get('team')})
+team_filter = fc3.selectbox("담당팀", teams)
+keyword = st.text_input("검색 (호수·계약자·연락처·담당자)", placeholder="예: 1502, 홍길동")
 
-st.title("📋 계약 리스트")
-
-# ── 현장 선택 ─────────────────────────────────────────────────────
-all_sites = db.get_all_sites()
-if not all_sites:
-    st.info("등록된 현장이 없습니다.")
-    st.stop()
-
-accessible = sidebar.get_accessible_sites(user, all_sites)
-if not accessible:
-    st.error("담당 현장이 배정되지 않았습니다. 관리자에게 문의하세요.")
-    st.stop()
-elif len(accessible) == 1:
-    site_id = accessible[0]['id']
-    st.caption(f"현장: **{accessible[0]['name']}**")
-else:
-    site_map = {s['name']: s['id'] for s in accessible}
-    sel_site = st.selectbox("현장 선택", list(site_map.keys()))
-    site_id = site_map[sel_site]
-
-# ── 필터 ─────────────────────────────────────────────────────────
-fc1, fc2 = st.columns(2)
-type_filter = fc1.selectbox("계약구분 필터", ["전체", "가계약", "계약"])
-contracts = db.get_contracts(
-    site_id=site_id,
-    contract_type=type_filter if type_filter != "전체" else None,
-    active_only=True,
-)
-
-employees = db.get_employees(site_id)
-teams = ["전체"] + sorted(set(e['team'] for e in employees if e.get('team')))
-team_filter = fc2.selectbox("담당팀 필터", teams)
+contracts = db.get_contracts(site_id=site_id, contract_type=None if type_filter == "전체" else type_filter,
+                             active_only=status_filter == "유효 계약만")
+if status_filter == "해지된 계약만":
+    contracts = [c for c in contracts if c.get('status') == db.CONTRACT_CANCELLED]
 if team_filter != "전체":
     contracts = [c for c in contracts if c.get('assigned_team') == team_filter]
+if keyword.strip():
+    kw = keyword.strip()
+    contracts = [c for c in contracts if any(kw in str(c.get(f) or '') for f in
+                                             ('unit_no', 'customer_name', 'phone', 'assigned_staff', 'notes'))]
 
 if not contracts:
     st.info("계약 내역이 없습니다.")
     st.stop()
 
-# ── 테이블 ───────────────────────────────────────────────────────
-rows = []
-for ct in contracts:
-    bno = str(ct.get('building_no') or '')
-    uno = str(ct.get('unit_no') or '')
-    rows.append({
-        "단지": ct.get("complex_name") or "",
-        "동": bno + "동" if bno else "",
-        "호수": uno,
-        "계약구분": ct.get("contract_type") or "",
-        "계약자명": ct.get("customer_name") or "",
-        "연락처": ct.get("phone") or "",
-        "계약일": ct.get("contract_date") or "",
-        "담당팀": ct.get("assigned_team") or "",
-        "담당자": ct.get("assigned_staff") or "",
-        "계약금(원)": ct.get("deposit_total") or 0,
-        "비고": ct.get("notes") or "",
-    })
+df = pd.DataFrame([{
+    "단지": c.get("complex_name") or "", "동": f"{c['building_no']}동", "호수": c.get('unit_no') or '',
+    "타입": c.get('unit_type') or '', "상태": c.get('status') or '', "계약구분": c.get("contract_type") or "",
+    "계약자명": c.get("customer_name") or "", "연락처": c.get("phone") or "",
+    "계약일": c.get("contract_date") or "", "담당팀": c.get("assigned_team") or "",
+    "담당자": c.get("assigned_staff") or "", "분양가": c.get('sale_price') or 0,
+    "계약금": c.get("deposit_total") or 0, "비고": c.get("notes") or "",
+} for c in contracts])
 
-df = pd.DataFrame(rows)
+m1, m2, m3 = st.columns(3)
+m1.metric("건수", f"{len(df)}건")
+m2.metric("계약금 합계", f"{int(df['계약금'].sum()):,}원")
+m3.metric("분양가 합계", f"{int(df['분양가'].sum()):,}원")
 
-st.markdown(f"총 **{len(contracts)}**건")
-st.dataframe(
-    df.style.format({"계약금(원)": "{:,}"}),
-    use_container_width=True,
-    hide_index=True,
-)
+st.dataframe(df, width="stretch", hide_index=True,
+             column_config={"분양가": st.column_config.NumberColumn(format="localized"),
+                            "계약금": st.column_config.NumberColumn(format="localized")})
 
-# ── 엑셀 다운로드 ─────────────────────────────────────────────────
-buf = io.BytesIO()
-with pd.ExcelWriter(buf, engine='openpyxl') as writer:
-    df.to_excel(writer, index=False, sheet_name='계약리스트')
-buf.seek(0)
-st.download_button(
-    "📥 엑셀 다운로드",
-    data=buf,
-    file_name="계약리스트.xlsx",
-    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-)
+with st.expander("📊 담당팀·담당자별 실적"):
+    active_df = df[df['상태'] == db.CONTRACT_ACTIVE]
+    if active_df.empty:
+        st.caption("유효 계약 없음")
+    else:
+        g = active_df.groupby(['담당팀', '담당자', '계약구분']).size().unstack(fill_value=0)
+        g['합계'] = g.sum(axis=1)
+        st.dataframe(g.sort_values('합계', ascending=False), width="stretch")
+
+st.download_button("📥 엑셀 다운로드", data=sidebar.excel_bytes({'계약리스트': df}),
+                   file_name=f"계약리스트_{site['name']}.xlsx", mime=sidebar.XLSX_MIME)

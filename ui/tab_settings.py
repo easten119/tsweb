@@ -293,13 +293,27 @@ def _import(ctx, admin):
         with st.expander(f"확인 필요 {len(plan['errors'])}건", expanded=True):
             for e in plan['errors'][:300]:
                 st.write("· " + e)
+    stale = plan.get('stale', [])
+    stale_mode = 'keep'
+    if stale:
+        n_ph = sum(1 for x in stale if x['placeholder'])
+        st.warning(f"엑셀에서는 비어 있는데 시스템에 유효 계약이 남아 있는 호실 {len(stale)}건 "
+                   f"(그중 '(계약자 미기재)' {n_ph}건)")
+        with st.expander("해당 호실 보기"):
+            st.dataframe(pd.DataFrame([{'동': x['dong'], '호수': x['ho'], '계약자': x['customer_name'],
+                                        '상태': x['contract_type']} for x in stale]), hide_index=True, placeholder="")
+        stale_mode = st.radio("이 계약들을 어떻게 할까요?", list(importer.STALE_MODES),
+                              format_func=importer.STALE_MODES.get, index=1 if n_ph else 0, key="im_stale")
+    st.caption("갱신할 때 엑셀의 빈 칸은 기존 값을 지우지 않습니다 (웹에서 입력한 값 보호).")
     if plan['units'] and st.button("가져오기 실행", type="primary", icon=":material/upload:"):
         try:
-            s = importer.apply(site_id, plan, tx_rows)
+            s = importer.apply(site_id, plan, tx_rows, stale_mode=stale_mode)
         except Exception as e:  # noqa: BLE001
             st.error(f"가져오기 실패 (아무것도 저장되지 않음): {e}")
             return
         st.session_state.pop('im_file', None)
         cm.flash(f"가져오기 완료 — 호실 신규 {s['unit_new']}·갱신 {s['unit_upd']} / 계약 신규 {s['ct_new']}·갱신 "
-                 f"{s['ct_upd']} / 납부 {s['pay']} / 입출금 {s['tx']}")
+                 f"{s['ct_upd']} / 납부 {s['pay']} / 입출금 {s['tx']}"
+                 + (f" / 빠진 계약 삭제 {s['stale_deleted']}·해지 {s['stale_cancelled']}"
+                    if s['stale_deleted'] or s['stale_cancelled'] else ""))
         st.rerun()

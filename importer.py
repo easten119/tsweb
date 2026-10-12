@@ -59,6 +59,9 @@ def auto_map(headers, cfg):
         add(p['label'], f"가격: {p['label']}")
     for f in cfg['fields']:
         add(f['label'], f"기타: {f['label']}")
+        for x, y in (('발행', '발급'), ('발급', '발행')):   # '계약서 발행' = '계약서발급'
+            if x in f['label']:
+                add(f['label'].replace(x, y), f"기타: {f['label']}")
     for d in cfg['docs']:
         add(d, f"서류: {d}")
     for item in cfg['payment_items']:
@@ -230,12 +233,28 @@ def analyze(df, mapping, cfg, site_id):
                 pays.append({'item': item, 'amount': amt, 'date': _date(g(f"납부일: {item}"))})
         plan['n_pay'] += len(pays)
         plan['units'].append({'unit': unit, 'contract': contract, 'pays': pays, 'line': line})
+        if not contract and ex and ex['id'] in active and not (status and status != '공실'):
+            c = active[ex['id']]
+            plan.setdefault('stale', []).append({
+                'contract_id': c['id'], 'unit_id': ex['id'], 'dong': dong, 'ho': ho,
+                'customer_name': c['customer_name'], 'contract_type': c['contract_type'],
+                'placeholder': c['customer_name'] == NO_NAME})
+    plan.setdefault('stale', [])
     return plan
 
 
-def apply(site_id, plan, tx_rows=None):
-    """계획 반영 (한 트랜잭션). tx_rows: 입출금 시트 행 [{dong, ho, date, type, amount, ...}]"""
-    stats = {'unit_new': 0, 'unit_upd': 0, 'ct_new': 0, 'ct_upd': 0, 'pay': 0, 'tx': 0}
+STALE_MODES = {
+    'keep': '그대로 둠',
+    'placeholder': "가져오기로 생긴 '(계약자 미기재)' 계약만 삭제",
+    'cancel': "미기재 계약은 삭제, 나머지는 해지 처리 (오늘 날짜, 비고 '엑셀 동기화')",
+}
+
+
+def apply(site_id, plan, tx_rows=None, stale_mode='keep'):
+    """계획 반영 (한 트랜잭션). tx_rows: 입출금 시트 행 [{dong, ho, date, type, amount, ...}]
+    stale_mode: 엑셀에서 비어 있는데 DB에 유효 계약이 남은 호실 처리 (STALE_MODES)"""
+    stats = {'unit_new': 0, 'unit_upd': 0, 'ct_new': 0, 'ct_upd': 0, 'pay': 0, 'tx': 0,
+             'stale_deleted': 0, 'stale_cancelled': 0}
     with db.connect() as conn:
         cx = conn.execute("SELECT id FROM complexes WHERE site_id=? ORDER BY complex_no LIMIT 1", (site_id,)).fetchone()
         cx_id = cx[0] if cx else conn.execute(
@@ -285,7 +304,16 @@ def apply(site_id, plan, tx_rows=None):
                 cur = conn.execute(f"SELECT id FROM contracts WHERE unit_id=? AND status='{db.CONTRACT_ACTIVE}'",
                                    (uid,)).fetchone()
                 if cur:
-                    db._update_contract(conn, cur['id'], ct)
+                    old = conn.execute("SELECT extra FROM contracts WHERE id=?", (cur['id'],)).fetchone()
+                    old_ex = db._jload(old['extra'])
+                    upd = {k: v for k, v in ct.items() if k != 'extra' and v not in (None, '')}
+                    if not ct.get('deposit_total'):
+                        upd.pop('deposit_total', None)
+                    new_ex = dict(old_ex)
+                    new_ex['fields'] = {**old_ex.get('fields', {}), **ct['extra'].get('fields', {})}
+                    new_ex['docs'] = {**old_ex.get('docs', {}), **ct['extra'].get('docs', {})}
+                    upd['extra'] = new_ex
+                    db._update_contract(conn, cur['id'], upd)
                     stats['ct_upd'] += 1
                 else:
                     db._insert_contract(conn, uid, site_id, ct)
@@ -312,6 +340,20 @@ def apply(site_id, plan, tx_rows=None):
                          (uid, site_id, t['date'], t.get('depositor'), t.get('customer'), t.get('account'),
                           t['amount'], t['type'], t.get('item'), t.get('out_reason'), t.get('notes')))
             stats['tx'] += 1
+        for sc in plan.get('stale', []) if stale_mode != 'keep' else []:
+            used = conn.execute("SELECT COUNT(*) FROM transactions WHERE unit_id=?", (sc['unit_id'],)).fetchone()[0]
+            if sc['placeholder'] and not used:
+                conn.execute("UPDATE cancellations SET contract_id=NULL WHERE contract_id=?", (sc['contract_id'],))
+                conn.execute("DELETE FROM contracts WHERE id=?", (sc['contract_id'],))
+                stats['stale_deleted'] += 1
+            elif stale_mode == 'cancel':
+                conn.execute("""INSERT INTO cancellations (unit_id, contract_id, cancel_date, refund_amount, status, notes)
+                                VALUES (?, ?, ?, 0, '해지', '엑셀 동기화')""",
+                             (sc['unit_id'], sc['contract_id'], date.today().isoformat()))
+                conn.execute(f"UPDATE contracts SET status='{db.CONTRACT_CANCELLED}', cancelled_at=? WHERE id=?",
+                             (date.today().isoformat(), sc['contract_id']))
+                stats['stale_cancelled'] += 1
+            db._resync_unit_status(conn.cursor(), [sc['unit_id']])
     return stats
 
 

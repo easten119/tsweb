@@ -131,8 +131,15 @@ def _template(ctx, admin):
             if f['type'] == 'select':
                 f['options'] = [o.strip() for o in str(r['선택지'] or '').split(',') if o.strip()]
             fields.append(f)
+        from collections import Counter
+        from ui.tab_contracts import CONTRACT_COLS
+        names = ([p['label'] for p in price_fields] + [f['label'] for f in fields] + docs
+                 + list(CONTRACT_COLS) + ['동', '호수', '타입', '상태', '입금총액'])
+        dup = [n for n, k in Counter(names).items() if k > 1]
         if not statuses:
             st.error("상태를 하나 이상 입력하세요.")
+        elif dup:
+            st.error(f"항목 이름이 겹칩니다: {', '.join(dup)} — 가격·기타·서류 항목과 기본 열은 서로 다른 이름이어야 합니다.")
         else:
             new = dict(cfg, price_fields=price_fields, statuses=statuses, payment_items=items, docs=docs, fields=fields)
             db.update_site_config(site['id'], preset, templates.dump_config(new))

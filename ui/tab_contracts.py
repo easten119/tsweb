@@ -21,6 +21,11 @@ CONTRACT_COLS = {  # 표 열 이름 → contracts 컬럼
 DATE_COLS = ('생년월일', '가계약일', '계약예정일', '계약일')
 
 
+def pay_col(item):
+    """입금항목의 납부액 열 이름 (예: 업무대행비 → '업무대행비 납부액'; 같은 이름의 가격 열과 구분)."""
+    return f"{item} 납부액"
+
+
 def _price(u, key):
     return (u.get(key) if key in templates.UNIT_COLUMNS else u['extra_d'].get(key)) or 0
 
@@ -44,7 +49,7 @@ def build_frame(units, cfg):
         r['입금총액'] = u['paid_in'] - u['paid_out']
         for item in cfg['payment_items']:
             amt, first = u['items'].get(item, (None, None))
-            r[item] = amt
+            r[pay_col(item)] = amt      # 가격 항목과 이름이 같아도 겹치지 않게 '○○ 납부액'
             r[f"{item} 납부일"] = cm.to_date(first)
         for d in cfg['docs']:
             r[d] = bool(dv.get(d))
@@ -104,7 +109,7 @@ def column_config(cfg, employees, editable, df=None):
         else:
             conf[lab] = st.column_config.TextColumn(lab)
     for item in cfg['payment_items']:
-        conf[item] = st.column_config.NumberColumn(item, format="localized", disabled=True,
+        conf[pay_col(item)] = st.column_config.NumberColumn(pay_col(item), format="localized", disabled=True,
                                                    help="입출금에서 이 입금항목으로 들어온 금액")
         conf[f"{item} 납부일"] = st.column_config.DateColumn(f"{item} 납부일", format="YYYY-MM-DD", disabled=True)
     for d in cfg['docs']:

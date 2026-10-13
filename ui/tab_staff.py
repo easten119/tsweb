@@ -137,9 +137,12 @@ def _attendance_input(ctx):
     sdf = pd.DataFrame(summary)
     with st.expander("월 출근 요약 (저장된 기록 기준)"):
         st.dataframe(sdf, hide_index=True, placeholder="", width="stretch")
+    # 체크박스(True/False)를 출근부 표기(O / 빈칸)로 — pandas 3의 DataFrame.replace는 bool 열에서 오류가 나서 직접 변환
+    export = edited.drop(columns=['_id']).copy()
+    for d in days:
+        export[str(d)] = ['O' if bool(v) else '' for v in export[str(d)]]
     st.download_button("출근부 엑셀", icon=":material/download:",
-                       data=cm.excel_bytes({f"{month}월출근현황": edited.drop(columns=['_id'])
-                                           .replace({True: 'O', False: ''}), '요약': sdf}),
+                       data=cm.excel_bytes({f"{month}월출근현황": export, '요약': sdf}),
                        file_name=f"출근부_{site['name']}_{year}{month:02d}.xlsx", mime=cm.XLSX_MIME)
 
 

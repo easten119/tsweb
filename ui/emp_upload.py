@@ -162,7 +162,7 @@ def analyze_upload(file_bytes, default_year, accessible_sites):
             if status and status not in STATUSES:
                 warnings.append(f"{label} ({name}): 상태 '{status}' → 재직/퇴직만 가능, 기존값 유지")
                 status = None
-            fields = dict(site_id=sid, name=name, division=_s(g(row, '본부')), team=_s(g(row, '팀')),
+            fields = dict(site_id=sid, name=name, division=_s(g(row, '본부')), team=db.normalize_team(_s(g(row, '팀'))),
                           phone=phone, first_work_date=str(fwd) if fwd else None, housing_region=region,
                           status=status, notes=_s(g(row, '비고')), sort_order=i)
             existing = match_emp(sid, name, phone, label)

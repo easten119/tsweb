@@ -13,6 +13,7 @@ import hmac
 import secrets
 import calendar
 import json
+import re
 from contextlib import contextmanager
 from datetime import date
 
@@ -20,10 +21,23 @@ DB_PATH = os.environ.get('TSWEB_DB_PATH') or os.path.join(
     os.path.dirname(os.path.abspath(__file__)), 'sales_manager.db')
 
 DEFAULT_ADMIN_PASSWORD = 'admin1234'
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 CONTRACT_ACTIVE = '유효'
 CONTRACT_CANCELLED = '해지'
+
+
+def normalize_team(v):
+    """팀 이름 통일: 숫자만 있으면 'N팀' ('1', '1.0', '1 팀', '01팀' → '1팀'). 그 외('본부' 등)는 공백만 정리."""
+    if v is None:
+        return None
+    s = str(v).strip()
+    if not s or s.lower() in ('nan', 'none'):
+        return None
+    m = re.fullmatch(r'0*(\d+)(?:\.0+)?(팀)?', re.sub(r'\s+', '', s))
+    if m:
+        return f"{int(m.group(1))}팀"
+    return s
 
 
 def get_conn():
@@ -320,6 +334,13 @@ def init_db():
     if version < 3:
         # 기존 가계약: 계약일을 가계약일로도 기록
         cur.execute("UPDATE contracts SET pre_date = contract_date WHERE contract_type='가계약' AND pre_date IS NULL")
+    if version < 4:
+        # 팀 이름 통일 ('1' / '1팀' → '1팀') — 직원·계약 담당팀
+        for table, col in (('employees', 'team'), ('contracts', 'assigned_team')):
+            for r in cur.execute(f"SELECT id, {col} FROM {table} WHERE {col} IS NOT NULL").fetchall():
+                new = normalize_team(r[1])
+                if new != r[1]:
+                    cur.execute(f"UPDATE {table} SET {col}=? WHERE id=?", (new, r[0]))
     if version < SCHEMA_VERSION:
         cur.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
@@ -478,6 +499,7 @@ def find_employees(site_id, name):
 
 def add_employee(site_id, name, division, team, phone, first_work_date,
                  housing_region='해당지역', status='재직', notes=None):
+    team = normalize_team(team)
     with connect() as conn:
         cur = conn.execute("""
             INSERT INTO employees (site_id, name, division, team, phone, first_work_date,
@@ -489,6 +511,7 @@ def add_employee(site_id, name, division, team, phone, first_work_date,
 
 def update_employee(emp_id, name, division, team, phone, first_work_date, housing_region, status,
                     notes=None):
+    team = normalize_team(team)
     with connect() as conn:
         conn.execute("""
             UPDATE employees
@@ -1106,6 +1129,8 @@ def get_contract(contract_id):
 
 def _contract_values(data):
     vals = {k: data.get(k) for k in CONTRACT_FIELDS if k in data}
+    if 'assigned_team' in vals:
+        vals['assigned_team'] = normalize_team(vals['assigned_team'])
     if 'extra' in vals and not isinstance(vals['extra'], (str, type(None))):
         vals['extra'] = _jdump(vals['extra'])
     return vals

@@ -272,9 +272,18 @@ def _upload(ctx):
             with st.expander(f"{title} {len(items)}건", expanded=title.startswith("오류")):
                 for msg in items[:300]:
                     fn(msg)
+    missing = plan.get('missing', [])
+    retire = False
+    if missing and plan['emp_plan']:
+        st.warning(f"이 파일 명단에 없는 재직자 {len(missing)}명 — 그대로 두면 재직 인원에 계속 포함됩니다.")
+        st.dataframe(pd.DataFrame([{'이름': m['name'], '본부': m['division'] or '', '팀': m['team'] or '',
+                                    '출근기록': f"{m['attendance']}일", '정산이력': f"{m['settlements']}건"}
+                                   for m in missing]), hide_index=True, placeholder="", width="content")
+        retire = st.checkbox(f"명단에 없는 {len(missing)}명을 '퇴직'으로 처리 (출근·정산 기록은 남습니다)",
+                             key="em_up_retire")
     if (plan['emp_plan'] or plan['att_plan']) and st.button("업로드 반영", type="primary"):
-        a, b, c = emp_upload.apply_upload(plan)
-        for k in ('_em_up_plan', '_em_up_sig', 'em_up_f'):
+        a, b, c, r = emp_upload.apply_upload(plan, retire_missing=retire)
+        for k in ('_em_up_plan', '_em_up_sig', 'em_up_f', 'em_up_retire'):
             st.session_state.pop(k, None)
-        cm.flash(f"반영 완료 — 신규 {a}명, 갱신 {b}명, 출근 {c}칸")
+        cm.flash(f"반영 완료 — 신규 {a}명, 갱신 {b}명, 출근 {c}칸" + (f", 퇴직 처리 {r}명" if r else ""))
         st.rerun()

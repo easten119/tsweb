@@ -248,10 +248,34 @@ def analyze_upload(file_bytes, default_year, accessible_sites):
                 elif not p and d in cur:
                     to_absent += 1
 
+    # 직원정보 시트에 없는 재직자 (명단에서 빠진 사람) — 파일에 나온 현장만 대상
+    missing = []
+    matched = {x['emp_id'] for x in emp_plan if x.get('emp_id')}
+    file_sites = {x['fields']['site_id'] for x in emp_plan}
+    for (sid, _name), emps in db_emps.items():
+        if sid not in file_sites:
+            continue
+        for e in emps:
+            if e['status'] == '재직' and e['id'] not in matched:
+                n_att = db.get_work_days_in_range(e['id'], '2000-01-01', '2999-12-31')
+                missing.append({'id': e['id'], 'name': e['name'], 'division': e.get('division'),
+                                'team': e.get('team'), 'attendance': n_att,
+                                'settlements': db.count_employee_settlements(e['id'])})
+
     return {'emp_plan': emp_plan, 'att_plan': att_plan, 'errors': errors, 'warnings': warnings,
             'months': sorted(months), 'emp_sheets': emp_sheets, 'att_sheets': att_sheets,
-            'to_present': to_present, 'to_absent': to_absent}
+            'to_present': to_present, 'to_absent': to_absent, 'missing': missing}
 
 
-def apply_upload(plan):
-    return db.apply_employee_upload(plan['emp_plan'], plan['att_plan'])
+def apply_upload(plan, retire_missing=False):
+    """반영. retire_missing이면 명단에서 빠진 재직자를 '퇴직'으로 바꾼다 (출근·정산 기록은 유지)."""
+    result = db.apply_employee_upload(plan['emp_plan'], plan['att_plan'])
+    n_ret = 0
+    if retire_missing:
+        for m in plan.get('missing', []):
+            e = db.get_employee(m['id'])
+            if e and e['status'] == '재직':
+                db.update_employee(e['id'], e['name'], e.get('division'), e.get('team'), e.get('phone'),
+                                   e.get('first_work_date'), e.get('housing_region'), '퇴직', e.get('notes'))
+                n_ret += 1
+    return result + (n_ret,)

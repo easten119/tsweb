@@ -40,6 +40,19 @@ def normalize_team(v):
     return s
 
 
+def normalize_division(v):
+    """본부 이름 통일: 숫자만 있으면 'N본부' ('1', '1.0', '01본부' → '1본부'). 그 외는 공백만 정리."""
+    if v is None:
+        return None
+    s = str(v).strip()
+    if not s or s.lower() in ('nan', 'none'):
+        return None
+    m = re.fullmatch(r'0*(\d+)(?:\.0+)?(본부)?', re.sub(r'\s+', '', s))
+    if m:
+        return f"{int(m.group(1))}본부"
+    return s
+
+
 def get_conn():
     conn = sqlite3.connect(DB_PATH, timeout=15)
     conn.row_factory = sqlite3.Row
@@ -293,6 +306,7 @@ def init_db():
     _add_column(cur, 'contracts', 'notes2 TEXT')
     _add_column(cur, 'contracts', 'extra TEXT')
     _add_column(cur, 'transactions', 'item TEXT')
+    _add_column(cur, 'contracts', 'assigned_division TEXT')
 
     # ── 인덱스 ────────────────────────────────────────────────
     _try(cur, """CREATE UNIQUE INDEX IF NOT EXISTS idx_settlement_unique
@@ -1076,8 +1090,8 @@ _CONTRACT_SELECT = """
 
 # 계약 화면에서 쓰는 컬럼 (extra는 JSON: {"fields": {...}, "docs": {...}})
 CONTRACT_FIELDS = ('customer_name', 'phone', 'birth_date', 'address', 'contract_type', 'pre_date',
-                   'planned_date', 'contract_date', 'deposit_total', 'assigned_team', 'assigned_staff',
-                   'notes', 'notes2', 'extra')
+                   'planned_date', 'contract_date', 'deposit_total', 'assigned_division', 'assigned_team',
+                   'assigned_staff', 'notes', 'notes2', 'extra')
 
 
 def _jload(v):
@@ -1131,6 +1145,8 @@ def _contract_values(data):
     vals = {k: data.get(k) for k in CONTRACT_FIELDS if k in data}
     if 'assigned_team' in vals:
         vals['assigned_team'] = normalize_team(vals['assigned_team'])
+    if 'assigned_division' in vals:
+        vals['assigned_division'] = normalize_division(vals['assigned_division'])
     if 'extra' in vals and not isinstance(vals['extra'], (str, type(None))):
         vals['extra'] = _jdump(vals['extra'])
     return vals

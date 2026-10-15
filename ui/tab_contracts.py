@@ -15,7 +15,7 @@ from ui import unit_card
 
 CONTRACT_COLS = {  # 표 열 이름 → contracts 컬럼
     '계약자명': 'customer_name', '생년월일': 'birth_date', '연락처': 'phone', '가계약일': 'pre_date',
-    '계약예정일': 'planned_date', '계약일': 'contract_date', '담당팀': 'assigned_team', '담당자': 'assigned_staff',
+    '계약예정일': 'planned_date', '계약일': 'contract_date', '담당본부': 'assigned_division', '담당팀': 'assigned_team', '담당자': 'assigned_staff',
     '계약금': 'deposit_total', '주소': 'address', '비고1': 'notes', '비고2': 'notes2',
 }
 DATE_COLS = ('생년월일', '가계약일', '계약예정일', '계약일')
@@ -70,6 +70,8 @@ def column_config(cfg, employees, editable, df=None):
     statuses = ['공실'] + templates.status_names(cfg)
     if df is not None:   # 표에 이미 있는 값(예: 양식에 없는 상태, 퇴사자 담당자)도 선택지에 포함
         statuses += sorted(_texts(df['상태']) - set(statuses))
+    divs = sorted({e['division'] for e in employees if e.get('division')} |
+                  (_texts(df['담당본부']) if df is not None else set()))
     teams = sorted({e['team'] for e in employees if e.get('team')} | (_texts(df['담당팀']) if df is not None else set()))
     staff = sorted({e['name'] for e in employees} | (_texts(df['담당자']) if df is not None else set()))
     conf = {
@@ -83,6 +85,8 @@ def column_config(cfg, employees, editable, df=None):
         '가계약일': st.column_config.DateColumn('가계약일', format="YYYY-MM-DD"),
         '계약예정일': st.column_config.DateColumn('계약예정일', format="YYYY-MM-DD"),
         '계약일': st.column_config.DateColumn('계약일', format="YYYY-MM-DD"),
+        '담당본부': st.column_config.SelectboxColumn('담당본부', options=divs) if divs else
+        st.column_config.TextColumn('담당본부'),
         '담당팀': st.column_config.SelectboxColumn('담당팀', options=teams) if teams else
         st.column_config.TextColumn('담당팀'),
         '담당자': st.column_config.SelectboxColumn('담당자', options=staff) if staff else

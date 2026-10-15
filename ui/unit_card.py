@@ -78,6 +78,15 @@ def render(ctx, unit_id, show_close=True):
         _history(unit)
 
 
+def _staff_division(employees, staff, team):
+    """본부를 비워 두면 담당자(같은 이름이 여럿이면 팀까지)로 본부를 채운다."""
+    if not staff:
+        return None
+    divs = {e.get('division') for e in employees
+            if e['name'] == staff and (not team or e.get('team') == team) and e.get('division')}
+    return divs.pop() if len(divs) == 1 else None
+
+
 def _contract_form(ctx, unit, ct):
     site_id, cfg, editable = ctx['site_id'], ctx['cfg'], ctx['editable']
     ct = ct or {}
@@ -85,6 +94,7 @@ def _contract_form(ctx, unit, ct):
     fvals, dvals = extra.get('fields', {}), extra.get('docs', {})
     employees = db.get_employees(site_id)
     teams = sorted({e['team'] for e in employees if e.get('team')})
+    divs = sorted({e['division'] for e in employees if e.get('division')})
     k = f"uc_{unit['id']}_{ct.get('id', 'new')}"
     statuses = templates.status_names(cfg)
     disabled = not editable
@@ -111,17 +121,20 @@ def _contract_form(ctx, unit, ct):
                                     format="%d", disabled=disabled)
 
         c = st.columns(4)
+        cur_div = ct.get('assigned_division') or ''
+        div_opts = [''] + divs + ([cur_div] if cur_div and cur_div not in divs else [])
+        division = c[0].selectbox("담당본부", div_opts, index=div_opts.index(cur_div), disabled=disabled)
         cur_team = ct.get('assigned_team') or ''
         team_opts = [''] + teams + ([cur_team] if cur_team and cur_team not in teams else [])
-        team = c[0].selectbox("담당팀", team_opts, index=team_opts.index(cur_team), disabled=disabled)
+        team = c[1].selectbox("담당팀", team_opts, index=team_opts.index(cur_team), disabled=disabled)
         staff_names = sorted({e['name'] for e in employees if not team or e.get('team') == team})
         cur_staff = ct.get('assigned_staff') or ''
         staff_opts = [''] + staff_names + ([cur_staff] if cur_staff and cur_staff not in staff_names else [])
-        staff = c[1].selectbox("담당자", staff_opts, index=staff_opts.index(cur_staff), disabled=disabled)
+        staff = c[2].selectbox("담당자", staff_opts, index=staff_opts.index(cur_staff), disabled=disabled)
 
-        # 현장 양식의 기타 항목: 담당팀·담당자 옆 빈칸부터 4칸씩 채움
+        # 현장 양식의 기타 항목: 담당본부·담당팀·담당자 옆 빈칸부터 4칸씩 채움
         new_fields = {}
-        slots = [c[2], c[3]]
+        slots = [c[3]]
         for i, f in enumerate(cfg['fields']):
             if i >= len(slots):
                 slots += list(st.columns(4))
@@ -158,6 +171,7 @@ def _contract_form(ctx, unit, ct):
             'address': address.strip() or None, 'contract_type': status,
             'pre_date': cm.date_str(pre_date), 'planned_date': cm.date_str(planned),
             'contract_date': cm.date_str(cdate), 'deposit_total': int(deposit),
+            'assigned_division': division or _staff_division(employees, staff, team),
             'assigned_team': team or None, 'assigned_staff': staff or None,
             'notes': notes.strip() or None, 'notes2': notes2.strip() or None,
             'extra': {'fields': {k2: (cm.date_str(v) if isinstance(v, date) else v) for k2, v in new_fields.items()
@@ -256,7 +270,7 @@ def _history(unit):
         st.dataframe(pd.DataFrame([{
             '상태': c.get('status'), '구분': c.get('contract_type'), '계약자': c.get('customer_name'),
             '가계약일': c.get('pre_date') or '', '계약일': c.get('contract_date') or '',
-            '해지일': c.get('cancelled_at') or '', '담당': f"{c.get('assigned_team') or ''} {c.get('assigned_staff') or ''}"}
+            '해지일': c.get('cancelled_at') or '', '담당': ' '.join(x for x in (c.get('assigned_division'), c.get('assigned_team'), c.get('assigned_staff')) if x)}
             for c in contracts]), hide_index=True, placeholder="", width="stretch")
     if cancels:
         st.dataframe(pd.DataFrame([{
